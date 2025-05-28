@@ -1,4 +1,4 @@
-# Core libraries
+# Core libraries - Wedn 5/28/25
 tqdm
 rich
 ninja
