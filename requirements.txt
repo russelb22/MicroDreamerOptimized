@@ -1,3 +1,4 @@
+# Core libraries
 tqdm
 rich
 ninja
@@ -7,28 +8,36 @@ scipy
 scikit-learn
 matplotlib
 opencv-python
-imageio==2.33.1
+imageio
 imageio-ffmpeg
 omegaconf
+tyro
+nerfacc
 
-torch==2.0.1
-torchvision==0.15.2
-xformers==0.0.22
+# PyTorch and vision - installed separately with CUDA support
+# torch and torchvision should be installed via pip with the proper CUDA wheel
+
 einops
 plyfile
 pygltflib
 
-
-# for stable-diffusion
+# Diffusion model support
 huggingface_hub
-diffusers==0.25.0
+diffusers
 accelerate
 transformers
 
-# for dmtet and mesh export
+# Mesh and geometry utilities
 xatlas
 trimesh
 PyMCubes
 pymeshlab
 
+# Background removal
 rembg[gpu,cli]
+
+# NOTE:
+# xformers is optional, and it often causes install issues.
+# Leave it out unless explicitly required. You can add:
+# pip install xformers --index-url https://download.pytorch.org/whl/cu124
+# separately if needed.
