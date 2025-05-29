@@ -23,6 +23,67 @@ from gs_postprocess import filter_out
 from loss_utils import ssim,lpips
 # from clip_sim import cal_clip_sim
 
+from torch.cuda import nvtx
+
+# Global profiler object
+global_profiler = {"broad": None, "function": None}
+
+def is_nvtx(opt):
+    return opt.profiling.enabled and opt.profiling.mode.lower() == "nvtx"
+
+def is_torch(opt):
+    return opt.profiling.enabled and opt.profiling.mode.lower() == "torch"
+
+# --- NVTX helpers ---
+
+def nvtx_push(opt, fn_name: str, scope: str):
+    #print(f"[DEBUG] NVTX CHECK: enabled={opt.profiling.enabled}, mode={opt.profiling.mode}, scope={opt.profiling.scope}")
+    if is_nvtx(opt) and opt.profiling.scope.lower() == scope:
+        nvtx.range_push(fn_name)
+
+def nvtx_pop(opt, scope: str):
+    if is_nvtx(opt) and opt.profiling.scope.lower() == scope:
+        nvtx.range_pop()
+
+def nvtx_push_broad(opt, fn_name: str):
+    #print(f"[DEBUG] NVTX PUSH BROAD: {fn_name}")
+    nvtx_push(opt, fn_name, "broad")
+
+def nvtx_pop_broad(opt): nvtx_pop(opt, "broad")
+def nvtx_push_function(opt, fn_name: str): nvtx_push(opt, fn_name, "function")
+def nvtx_pop_function(opt): nvtx_pop(opt, "function")
+
+# --- Torch Profiler helpers ---
+
+def torch_profiler_start(opt, scope: str):
+    if is_torch(opt) and opt.profiling.scope.lower() == scope:
+        global_profiler[scope] = torch.profiler.profile(
+            schedule=torch.profiler.schedule(wait=0, warmup=1, active=3, repeat=1),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(opt.profiling.output_dir),
+            record_shapes=True,
+            with_stack=True,
+        )
+        global_profiler[scope].__enter__()
+        global_profiler[scope].start()
+
+def torch_profiler_step(opt, scope: str):
+    if is_torch(opt) and opt.profiling.scope.lower() == scope:
+        global_profiler[scope].step()
+
+def torch_profiler_stop(opt, scope: str):
+    if is_torch(opt) and opt.profiling.scope.lower() == scope:
+        global_profiler[scope].stop()
+        global_profiler[scope].__exit__(None, None, None)
+        global_profiler[scope] = None
+
+def torch_profiler_start_broad(opt): torch_profiler_start(opt, "broad")
+def torch_profiler_step_broad(opt): torch_profiler_step(opt, "broad")
+def torch_profiler_stop_broad(opt): torch_profiler_stop(opt, "broad")
+
+def torch_profiler_start_function(opt): torch_profiler_start(opt, "function")
+def torch_profiler_step_function(opt): torch_profiler_step(opt, "function")
+def torch_profiler_stop_function(opt): torch_profiler_stop(opt, "function")
+
 class GUI:
     def __init__(self, opt):
         self.opt = opt  # shared with the trainer's opt to support in-place modification of rendering parameters.
@@ -167,7 +228,9 @@ class GUI:
         self.step = 0
 
         # setup training
+        nvtx_push_broad(opt, "GridEncoder Setup")
         self.renderer.gaussians.training_setup(self.opt)
+        nvtx_pop_broad(opt)
         # do not do progressive sh-level
         self.renderer.gaussians.active_sh_degree = self.renderer.gaussians.max_sh_degree
         self.optimizer = self.renderer.gaussians.optimizer
@@ -241,9 +304,9 @@ class GUI:
 
         batch_size=self.get_batch_size()
 
-        nvtx_push(opt, "TRAIN_LOOP")
+        nvtx_push_broad(opt, "TRAIN_LOOP")
         for _ in range(self.train_steps):
-            nvtx_push(opt, f"TRAIN_STEP {self._denoise_step}")
+            nvtx_push_broad(opt, f"TRAIN_STEP {self._denoise_step}")
             target_img=None
 
             self.step += 1
@@ -310,9 +373,9 @@ class GUI:
                     cur_cam = self.fixed_cam
                     
                     # rendering views
-                    nvtx_push(opt, "RENDERING")
+                    nvtx_push_broad(opt, "RENDERING")
                     out = self.renderer.render(cur_cam)
-                    nvtx_pop(opt)
+                    nvtx_pop_broad(opt)
 
                     # rgb loss
                     image = out["image"].unsqueeze(0) # [1, 3, H, W] in [0, 1]
@@ -324,29 +387,29 @@ class GUI:
                     loss = loss + self.opt.ref_mask_loss * F.mse_loss(mask, self.input_mask_torch,reduction='sum')
                 images=[]
                 
-                nvtx_push(opt, "RENDERING NOVEL VIEWS")
+                nvtx_push_broad(opt, "RENDERING NOVEL VIEWS")
                 for i, cur_cam in enumerate(cur_cams):
-                    nvtx_push(opt, f"RENDER VIEW {i}")
+                    nvtx_push_broad(opt, f"RENDER VIEW {i}")
                     out = self.renderer.render(cur_cam,bg_color=bg_color)
-                    nvtx_pop(opt)
+                    nvtx_pop_broad(opt)
                     image=out["image"].unsqueeze(0)
                     images.append(image)
                 images=torch.cat(images,dim=0)
-                nvtx_pop(opt)
+                nvtx_pop_broad(opt)
 
 
                 if self.enable_sd:
                     if self.opt.mvdream or self.opt.imagedream:
-                        nvtx_push(opt, f"GUIDANCE SD step {self._denoise_step}")
+                        nvtx_push_broad(opt, f"GUIDANCE SD step {self._denoise_step}")
                         target_img = self.guidance_sd.train_step(images, poses, step_ratio=None,guidance_scale=self.opt.cfg,target_img=target_img,step=step_t,init_3d=self.init_3d,iter_steps=self.denoise_steps)
-                        nvtx_pop(opt)
+                        nvtx_pop_broad(opt)
                         loss_my = F.l1_loss(images, target_img.to(images), reduction='sum')/images.shape[0]
                         loss = loss + self.opt.lambda_sd * loss_my
 
                 if self.enable_zero123:
-                    nvtx_push(opt, f"GUIDANCE ZERO123 step {self._denoise_step}")
+                    nvtx_push_broad(opt, f"GUIDANCE ZERO123 step {self._denoise_step}")
                     target_img=self.guidance_zero123.train_step(images, vers, hors, radii, step_ratio=None, default_elevation=self.opt.elevation,guidance_scale=self.opt.cfg,target_img=target_img,step=step_t,init_3d=self.init_3d,iter_steps=self.denoise_steps,inverse_ratio=self.opt.inv_r,ddim_eta=self.opt.eta)
-                    nvtx_pop(opt)
+                    nvtx_pop_broad(opt)
 
                     loss_my = F.l1_loss(images, target_img.to(images), reduction='sum')/images.shape[0]
                     # + torch.prod(torch.tensor(images.shape[1:]))*(1-ssim(images,target_img.to(images)))
@@ -354,24 +417,32 @@ class GUI:
                     loss = loss + self.opt.lambda_zero123 * loss_my
             
                 # backward pass
-                nvtx_push(opt, f"BACKWARD PASS step {self._denoise_step}")
-                loss.backward()
-                nvtx_pop(opt)
-                
+                print("calling nvtx_push_broad for BACKWARD PASS")
+                nvtx_push_broad(opt, f"BACKWARD PASS step {self._denoise_step}")
+                if torch.is_tensor(loss) and loss.requires_grad:
+                    loss.backward()
+                #else:
+                #    print(f"[WARN] Skipped loss.backward(), loss is type {type(loss)} at step {self._denoise_step}")
+                nvtx_pop_broad(opt)
+
                 # optimize step
-                nvtx_push(opt, f"OPTIMIZER.STEP step {self._denoise_step")
+                nvtx_push_broad(opt, f"OPTIMIZER.STEP step {self._denoise_step}")
                 self.optimizer.step()
-                nvtx_pop(opt)
+                nvtx_pop_broad(opt)
                 
-                nvtx_push(opt, f"OPTIMIZER.ZERO_GRAD step {self._denoise_step")
+                nvtx_push_broad(opt, f"OPTIMIZER.ZERO_GRAD step {self._denoise_step}")
                 self.optimizer.zero_grad()
-                nvtx_pop(opt)
+                nvtx_pop_broad(opt)
 
                 # densify and prune
                 if self.step >= self.opt.density_start_iter and self.step <= self.opt.density_end_iter:
                     viewspace_point_tensor, visibility_filter, radii = out["viewspace_points"], out["visibility_filter"], out["radii"]
                     self.renderer.gaussians.max_radii2D[visibility_filter] = torch.max(self.renderer.gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
-                    self.renderer.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
+                    #self.renderer.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
+                    if viewspace_point_tensor.grad is not None:
+                        self.renderer.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
+                    #else:
+                    #    print(f"[WARN] viewspace_point_tensor.grad is None at step {self.step}, skipping densification stats.")
 
                     if (self.step % self.opt.densification_interval == 0) or final_step:
                         self.renderer.gaussians.densify_and_prune(self.opt.densify_grad_threshold, min_opacity=0.005, extent=4, max_screen_size=1)
@@ -379,13 +450,13 @@ class GUI:
                     
             self._denoise_step += 1 if not self.init_3d else 0
             self.init_3d=False
-            nvtx_pop(opt)
+            nvtx_pop_broad(opt)
         ender.record()
         torch.cuda.synchronize()
         t = starter.elapsed_time(ender)
 
         self.need_update = True
-        nvtx_pop(opt)
+        nvtx_pop_broad(opt)
 
     @torch.no_grad()
     def test_step(self):
@@ -724,22 +795,21 @@ class GUI:
             # do a last prune
             self.renderer.gaussians.prune(min_opacity=0.01, extent=1, max_screen_size=1)
         filter_out(self.renderer)
-        # save
-        self.save_model(mode='model')
-        self.save_mesh()
-        # self.save_model(mode='geo+tex')
         
-def nvtx_push(opt, fn_name: str):
-    if opt.profiling.enabled and opt.profiling.mode.lower() == "nvtx":
-        nvtx.range_push(fn_name)
-
-def nvtx_pop(opt):
-    if opt.profiling.enabled and opt.profiling.mode.lower() == "nvtx":
-        nvtx.range_pop()
+        # save
+        if not (opt.profiling.enabled and opt.profiling.get("skip_postprocessing", False)):
+            self.save_model(mode='model')
+            self.save_mesh()
+            # self.save_model(mode='geo+tex')
 
 if __name__ == "__main__":
     import argparse
     from omegaconf import OmegaConf
+
+    nvtx.range_push("STARTUP")
+    import time
+    time.sleep(2)  # give it time to be visible in the timeline
+    nvtx.range_pop()
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True, help="path to the yaml config file")
@@ -751,14 +821,21 @@ if __name__ == "__main__":
     gui = GUI(opt)
     gui.seed_everything()
 
+    print("Profiling Mode:", opt.profiling.mode)
+
     if opt.gui:
-        nvtx_push(opt, "RENDER_TOP_LEVEL")
+        nvtx_push_broad(opt, "RENDER_TOP_LEVEL")
         gui.render()
-        nvtx_pop()
+        nvtx_pop_broad(opt)
     else:
-        nvtx_push(opt, "TRAIN_TOP_LEVEL")
+        print("calling nvtx_push_broad for TRAIN_TOP_LEVEL")
+        nvtx_push_broad(opt, "TRAIN_TOP_LEVEL")
         gui.train(opt.total_steps)
-        nvtx_pop()
+        nvtx_pop_broad(opt)
+        
     # gui.save_video(f'./{opt.save_path}-video.mp4')
-    gui.save_image(f'./test_dirs/work_dirs/{opt.save_path}',num=8)
-    gui.save_video(f'./test_dirs/work_dirs/{opt.save_path}/video.mp4')
+
+    #lets just focus on training for now by using the skip_postprocessing=true command line argument
+    if not (opt.profiling.enabled and opt.profiling.get("skip_postprocessing", False)):
+        gui.save_image(f'./test_dirs/work_dirs/{opt.save_path}',num=8)
+        gui.save_video(f'./test_dirs/work_dirs/{opt.save_path}/video.mp4')
