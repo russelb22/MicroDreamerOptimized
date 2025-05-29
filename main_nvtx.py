@@ -741,8 +741,6 @@ if __name__ == "__main__":
     import argparse
     from omegaconf import OmegaConf
 
-    from torch.cuda import nvtx
-
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True, help="path to the yaml config file")
     args, extras = parser.parse_known_args()
