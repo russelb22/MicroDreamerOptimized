@@ -101,3 +101,10 @@ eta: 0.5
 batch_size_max: 6
 batch_size_min: 6
 even_view: True
+
+# Profiling
+profiling:
+  enabled: true
+  mode: "torch"     # choices: ["none", "torch", "nvtx"]
+  scope: "broad"    # choices: ["broad", "function"]
+  output_dir: "logdir/profiler"
