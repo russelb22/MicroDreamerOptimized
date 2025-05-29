@@ -325,7 +325,7 @@ class GUI:
                 images=[]
                 
                 nvtx_push(opt, "RENDERING NOVEL VIEWS")
-                for cur_cam in cur_cams:
+                for i, cur_cam in enumerate(cur_cams):
                     nvtx_push(opt, f"RENDER VIEW {i}")
                     out = self.renderer.render(cur_cam,bg_color=bg_color)
                     nvtx_pop(opt)
@@ -354,16 +354,16 @@ class GUI:
                     loss = loss + self.opt.lambda_zero123 * loss_my
             
                 # backward pass
-                nvtx_push(opt, "BACKWARD PASS step {self._denoise_step}")
+                nvtx_push(opt, f"BACKWARD PASS step {self._denoise_step}")
                 loss.backward()
                 nvtx_pop(opt)
                 
                 # optimize step
-                nvtx_push(opt, "OPTIMIZER.STEP step {self._denoise_step")
+                nvtx_push(opt, f"OPTIMIZER.STEP step {self._denoise_step")
                 self.optimizer.step()
                 nvtx_pop(opt)
                 
-                nvtx_push(opt, "OPTIMIZER.ZERO_GRAD step {self._denoise_step")
+                nvtx_push(opt, f"OPTIMIZER.ZERO_GRAD step {self._denoise_step")
                 self.optimizer.zero_grad()
                 nvtx_pop(opt)
 
