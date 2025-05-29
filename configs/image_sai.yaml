@@ -16,7 +16,7 @@ density_thresh: 0.2
 ### Output
 outdir: logs
 mesh_format: obj
-save_path: ???
+save_path: "default_output"
 
 ### Training
 # use mvdream instead of sd 2.1
@@ -105,6 +105,7 @@ even_view: True
 # Profiling
 profiling:
   enabled: true
-  mode: "torch"     # choices: ["none", "torch", "nvtx"]
+  mode: "nvtx"     # choices: ["none", "torch", "nvtx"]
   scope: "broad"    # choices: ["broad", "function"]
   output_dir: "logdir/profiler"
+  skip_postprocessing: true
