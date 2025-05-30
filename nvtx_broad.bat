@@ -1,8 +1,10 @@
 @echo off
 REM Batch file to run MicroDreamer with NVTX profiling using Nsight Systems
 
+set "PATH=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.42.34433\bin\Hostx64\x86;%PATH%"
+
 REM Set output directory
-set OUTPUT_DIR=C:\3DMLGPU\p1\MicroDreamerOptimizing\logdir\nsys\broad_nvtx
+set OUTPUT_DIR=C:\3DMLGPU\p1\MicroDreamerOptimized\logdir\nsys\broad_nvtx
 
 REM Create output directory if it doesn't exist
 if not exist %OUTPUT_DIR% (
