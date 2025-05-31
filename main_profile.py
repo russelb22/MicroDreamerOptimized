@@ -12,7 +12,7 @@ import rembg
 import math
 
 from cam_utils import orbit_camera, OrbitCamera
-from gs_renderer import Renderer, MiniCam
+from gs_renderer import Renderer, MiniCam, gaussian_3d_coeff
 
 from grid_put import mipmap_linear_grid_put_2d
 from mesh import Mesh, safe_normalize
@@ -417,7 +417,7 @@ class GUI:
                     loss = loss + self.opt.lambda_zero123 * loss_my
             
                 # backward pass
-                print("calling nvtx_push_broad for BACKWARD PASS")
+                # print("calling nvtx_push_broad for BACKWARD PASS")
                 nvtx_push_broad(opt, f"BACKWARD PASS step {self._denoise_step}")
                 if torch.is_tensor(loss) and loss.requires_grad:
                     loss.backward()
@@ -797,14 +797,25 @@ class GUI:
         filter_out(self.renderer)
         
         # save
-        if not (opt.profiling.enabled and opt.profiling.get("skip_postprocessing", False)):
-            self.save_model(mode='model')
-            self.save_mesh()
-            # self.save_model(mode='geo+tex')
+        #if not (opt.profiling.enabled and opt.profiling.get("skip_postprocessing", False)):
+        print("[DEBUG] calling save_model which should call gaussian_3D_coeff, which has been put onto CUDA")
+        #self.save_model(mode='model')
+        #self.save_mesh()
+        self.save_model(mode='geo+tex')
+
+def test_gaussian_call():
+    xyzs = torch.randn(100000, 3)  # N x 3
+    covs = torch.randn(100000, 6)  # N x 6
+
+    result = gaussian_3d_coeff(xyzs, covs)
+    print(result[:5])
 
 if __name__ == "__main__":
     import argparse
     from omegaconf import OmegaConf
+
+    #test_gaussian_call()
+    #sys.exit(0)
 
     nvtx.range_push("STARTUP")
     import time
@@ -822,13 +833,14 @@ if __name__ == "__main__":
     gui.seed_everything()
 
     print("Profiling Mode:", opt.profiling.mode)
+    print("[DEBUG] Profiling config after CLI merge:", opt.profiling)
 
     if opt.gui:
         nvtx_push_broad(opt, "RENDER_TOP_LEVEL")
         gui.render()
         nvtx_pop_broad(opt)
     else:
-        print("calling nvtx_push_broad for TRAIN_TOP_LEVEL")
+        print("calling nvtx_push_broad for TRAIN_TOP_LEVEL - gui.train (only calling NVTX on scope broad tho")
         nvtx_push_broad(opt, "TRAIN_TOP_LEVEL")
         gui.train(opt.total_steps)
         nvtx_pop_broad(opt)
@@ -837,5 +849,8 @@ if __name__ == "__main__":
 
     #lets just focus on training for now by using the skip_postprocessing=true command line argument
     if not (opt.profiling.enabled and opt.profiling.get("skip_postprocessing", False)):
+        nvtx.range_push("save_image")
         gui.save_image(f'./test_dirs/work_dirs/{opt.save_path}',num=8)
+        nvtx.range_pop()
+
         gui.save_video(f'./test_dirs/work_dirs/{opt.save_path}/video.mp4')

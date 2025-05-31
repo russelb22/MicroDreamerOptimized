@@ -1,25 +1,44 @@
 @echo off
 REM Batch file to run MicroDreamer with or without NVTX profiling via Nsight Systems
 
-REM Set output directory
-set OUTPUT_DIR=C:\3DMLGPU\p1\MicroDreamerOptimized\logdir\nsys\broad_nvtx
+REM Set base output directory
+set BASE_OUTPUT_DIR=C:\3DMLGPU\p1\MicroDreamerOptimized\logdir\nsys
 
-REM add cl.exe location to PATH
+REM Generate a timestamp (format: YYYYMMDD_HHMMSS)
+for /f "tokens=1-4 delims=/ " %%a in ("%date%") do (
+    set mm=%%a
+    set dd=%%b
+    set yyyy=%%c
+)
+for /f "tokens=1-2 delims=: " %%a in ("%time%") do (
+    set hh=%%a
+    set min=%%b
+)
+REM remove leading spaces or zero pad if needed
+if 1%hh% LSS 110 set hh=0%hh%
+
+set TIMESTAMP=%yyyy%%mm%%dd%_%hh%%min%
+
+REM Final output path with timestamp
+set OUTPUT_FILE=%BASE_OUTPUT_DIR%\profile_%TIMESTAMP%
+
+REM Add cl.exe location to PATH
 set "PATH=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.42.34433\bin\Hostx64\x86;%PATH%"
 
 REM Create output directory if it doesn't exist
-if not exist %OUTPUT_DIR% (
-    mkdir %OUTPUT_DIR%
+if not exist %BASE_OUTPUT_DIR% (
+    mkdir %BASE_OUTPUT_DIR%
 )
 
 REM Check if the first argument is -profile
 IF "%1" == "-profile" (
     echo [INFO] Running with Nsight Systems NVTX profiling...
+    echo [INFO] Output file: %OUTPUT_FILE%.nsys-rep
 
     nsys profile ^
         --trace=cuda,nvtx ^
         --sample=none ^
-        --output="%OUTPUT_DIR%" ^
+        --output="%OUTPUT_FILE%" ^
         --force-overwrite=true ^
         python main_profile.py ^
         --config=configs/image_sai.yaml ^
@@ -27,7 +46,7 @@ IF "%1" == "-profile" (
         --save_path 05_objaverse_backpack_rgba ^
         --profiling.enabled true ^
         --profiling.mode nvtx ^
-        --profiling.scope broad ^
+        --profiling.scope function ^
         --profiling.skip_postprocessing true ^
         --iters 20
 ) ELSE (

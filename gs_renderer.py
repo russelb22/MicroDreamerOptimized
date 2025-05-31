@@ -65,6 +65,13 @@ def strip_symmetric(sym):
     return strip_lowerdiag(sym)
 
 def gaussian_3d_coeff(xyzs, covs):
+
+    xyzs = xyzs.to("cuda")  # profiler output shows that these run on the CPU without these to calls
+    covs = covs.to("cuda")
+    #print(xyzs.device, covs.device)
+    
+    #nvtx.range_push("IN GAUSSIAN_3D_COEFF")
+
     # xyzs: [N, 3]
     # covs: [N, 6]
     x, y, z = xyzs[:, 0], xyzs[:, 1], xyzs[:, 2]
@@ -82,8 +89,13 @@ def gaussian_3d_coeff(xyzs, covs):
     power = -0.5 * (x**2 * inv_a + y**2 * inv_d + z**2 * inv_f) - x * y * inv_b - x * z * inv_c - y * z * inv_e
 
     power[power > 0] = -1e10 # abnormal values... make weights 0
-        
-    return torch.exp(power)
+    
+    exp = torch.exp(power)
+    
+    torch.cuda.synchronize()
+    nvtx.range_pop()
+
+    return exp
 
 def build_rotation(r):
     norm = torch.sqrt(r[:,0]*r[:,0] + r[:,1]*r[:,1] + r[:,2]*r[:,2] + r[:,3]*r[:,3])
@@ -222,6 +234,7 @@ class GaussianModel:
     def extract_fields(self, resolution=128, num_blocks=16, relax_ratio=1.5):
         # resolution: resolution of field
         
+        #print("[DEBUG] IN extract fields")
         block_size = 2 / num_blocks
 
         assert resolution % block_size == 0
@@ -281,6 +294,7 @@ class GaussianModel:
                     # batch on gaussian to avoid OOM
                     batch_g = 1024
                     val = 0
+                    #print("DEBUG: in for loop that will call range_push(GAUSSIAN_3D_COEFF")
                     for start in range(0, g_covs.shape[1], batch_g):
                         end = min(start + batch_g, g_covs.shape[1])
                         
@@ -306,6 +320,8 @@ class GaussianModel:
         os.makedirs(os.path.dirname(path), exist_ok=True)
 
         occ = self.extract_fields(resolution).detach().cpu().numpy()
+
+        #print(f"[DEBUG] Extracting mesh with {self.num_points} points")
 
         import mcubes
         vertices, triangles = mcubes.marching_cubes(occ, density_thresh)
@@ -818,6 +834,7 @@ class Renderer:
         else:
             colors_precomp = override_color
 
+        #nvtx.range_push("GAUSSIAN_RASTERIZER")
         # Rasterize visible Gaussians to image, obtain their radii (on screen).
         rendered_image, radii, rendered_depth, rendered_alpha = rasterizer(
             means3D=means3D,
@@ -829,7 +846,7 @@ class Renderer:
             rotations=rotations,
             cov3D_precomp=cov3D_precomp,
         )
-
+        #nvtx.range_pop()
         rendered_image = rendered_image.clamp(0, 1)
 
         # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
