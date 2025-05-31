@@ -7,6 +7,9 @@ from plyfile import PlyData, PlyElement
 import torch
 from torch import nn
 
+from torch.cuda import nvtx
+
+
 from diff_gaussian_rasterization import (
     GaussianRasterizationSettings,
     GaussianRasterizer,
@@ -280,7 +283,12 @@ class GaussianModel:
                     val = 0
                     for start in range(0, g_covs.shape[1], batch_g):
                         end = min(start + batch_g, g_covs.shape[1])
+                        
+                        # profiling gaussian_3d_coeff calls
+                        nvtx.range_push("GAUSSIAN_3D_COEFF")
                         w = gaussian_3d_coeff(g_pts[:, start:end].reshape(-1, 3), g_covs[:, start:end].reshape(-1, 6)).reshape(pts.shape[0], -1) # [M, l]
+                        nvtx.range_pop()
+                        
                         val += (mask_opas[:, start:end] * w).sum(-1)
                     
                     # kiui.lo(val, mask_opas, w)
