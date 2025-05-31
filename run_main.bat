@@ -21,7 +21,7 @@ IF "%1" == "-profile" (
         --sample=none ^
         --output="%OUTPUT_DIR%" ^
         --force-overwrite=true ^
-        python main_nvtx.py ^
+        python main_profile.py ^
         --config=configs/image_sai.yaml ^
         --input test_data/05_objaverse_backpack_rgba.png ^
         --save_path 05_objaverse_backpack_rgba ^
@@ -33,7 +33,7 @@ IF "%1" == "-profile" (
 ) ELSE (
     echo [INFO] Running without profiling...
 
-    python main_nvtx.py ^
+    python main_profile.py ^
         --config=configs/image_sai.yaml ^
         --input test_data/05_objaverse_backpack_rgba.png ^
         --save_path 05_objaverse_backpack_rgba ^
