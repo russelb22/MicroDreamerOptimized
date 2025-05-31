@@ -45,13 +45,6 @@ IF ERRORLEVEL 1 (
 
 echo.
 echo ========================================
-echo Cloning MicroDreamerOptimized repository...
-echo ========================================
-REM git clone https://github.com/russelb22/MicroDreamerOptimized
-REM cd MicroDreamerOptimized
-
-echo.
-echo ========================================
 echo Installing Python dependencies from requirements.txt...
 echo ========================================
 pip install -r requirements.txt
