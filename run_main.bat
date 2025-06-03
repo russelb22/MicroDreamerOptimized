@@ -2,7 +2,7 @@
 REM Batch file to run MicroDreamer with or without NVTX profiling via Nsight Systems
 
 REM Set base output directory
-set BASE_OUTPUT_DIR=C:\3DMLGPU\p1\MicroDreamerOptimized\logdir\nsys
+set BASE_OUTPUT_DIR=.\logdir\nsys
 
 REM Generate a timestamp (format: YYYYMMDD_HHMMSS)
 for /f "tokens=1-4 delims=/ " %%a in ("%date%") do (
@@ -44,10 +44,10 @@ IF "%1" == "-profile" (
         --config=configs/image_sai.yaml ^
         --input test_data/05_objaverse_backpack_rgba.png ^
         --save_path 05_objaverse_backpack_rgba ^
-        --profiling.enabled true ^
-        --profiling.mode nvtx ^
-        --profiling.scope function ^
-        --profiling.skip_postprocessing true ^
+        --profiling.enabled=true ^
+        --profiling.mode=nvtx ^
+        --profiling.scope=broad ^
+        --profiling.skip_postprocessing=true ^
         --iters 20
 ) ELSE (
     echo [INFO] Running without profiling...

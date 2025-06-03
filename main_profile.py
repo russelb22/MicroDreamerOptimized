@@ -411,7 +411,10 @@ class GUI:
                     target_img=self.guidance_zero123.train_step(images, vers, hors, radii, step_ratio=None, default_elevation=self.opt.elevation,guidance_scale=self.opt.cfg,target_img=target_img,step=step_t,init_3d=self.init_3d,iter_steps=self.denoise_steps,inverse_ratio=self.opt.inv_r,ddim_eta=self.opt.eta)
                     nvtx_pop_broad(opt)
 
+                    nvtx_push_broad(opt, f"Loss calculation {self._denoise_step}")
                     loss_my = F.l1_loss(images, target_img.to(images), reduction='sum')/images.shape[0]
+                    nvtx_pop()
+
                     # + torch.prod(torch.tensor(images.shape[1:]))*(1-ssim(images,target_img.to(images)))
                     
                     loss = loss + self.opt.lambda_zero123 * loss_my
@@ -817,10 +820,10 @@ if __name__ == "__main__":
     #test_gaussian_call()
     #sys.exit(0)
 
-    nvtx.range_push("STARTUP")
-    import time
-    time.sleep(2)  # give it time to be visible in the timeline
-    nvtx.range_pop()
+    #nvtx.range_push("STARTUP")
+    #import time
+    #time.sleep(2)  # give it time to be visible in the timeline
+    #nvtx.range_pop()
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True, help="path to the yaml config file")
@@ -840,7 +843,7 @@ if __name__ == "__main__":
         gui.render()
         nvtx_pop_broad(opt)
     else:
-        print("calling nvtx_push_broad for TRAIN_TOP_LEVEL - gui.train (only calling NVTX on scope broad tho")
+        #print("calling nvtx_push_broad for TRAIN_TOP_LEVEL - gui.train (only calling NVTX on scope broad tho")
         nvtx_push_broad(opt, "TRAIN_TOP_LEVEL")
         gui.train(opt.total_steps)
         nvtx_pop_broad(opt)
