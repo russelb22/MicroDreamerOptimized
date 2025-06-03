@@ -30,6 +30,10 @@ if not exist %BASE_OUTPUT_DIR% (
     mkdir %BASE_OUTPUT_DIR%
 )
 
+
+REM Enable or Disable CUDA kernel
+set USE_CUDA_KERNEL=1
+
 REM Check if the first argument is -profile
 IF "%1" == "-profile" (
     echo [INFO] Running with Nsight Systems NVTX profiling...
@@ -46,7 +50,7 @@ IF "%1" == "-profile" (
         --save_path 05_objaverse_backpack_rgba ^
         --profiling.enabled=true ^
         --profiling.mode=nvtx ^
-        --profiling.scope=broad ^
+        --profiling.scope=function ^
         --profiling.skip_postprocessing=true ^
         --iters 20
 ) ELSE (

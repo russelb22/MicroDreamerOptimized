@@ -806,24 +806,48 @@ class GUI:
         #self.save_mesh()
         self.save_model(mode='geo+tex')
 
-def test_gaussian_call():
-    xyzs = torch.randn(100000, 3)  # N x 3
-    covs = torch.randn(100000, 6)  # N x 6
+import cuda_kernels  # This is your newly compiled extension
 
-    result = gaussian_3d_coeff(xyzs, covs)
-    print(result[:5])
+def compare_gaussian_cpu_to_gpu():
+    N = 100000
+    torch.manual_seed(42)  # Ensures reproducibility
+
+    # Generate identical input data for both CPU and GPU
+    xyzs = torch.randn(N, 3, dtype=torch.float32)
+    covs = torch.randn(N, 6, dtype=torch.float32)
+
+    # CPU (reference) version
+    ref_result = gaussian_3d_coeff(xyzs, covs).cpu()
+
+    # GPU (CUDA kernel) version
+    xyzs_cuda = xyzs.to('cuda').contiguous()
+    covs_cuda = covs.to('cuda').contiguous()
+    out = torch.empty(N, device='cuda', dtype=torch.float32)
+    cuda_kernels.gaussian_3d_launcher(xyzs_cuda, covs_cuda, out)
+    out_cpu = out.cpu()
+
+    # Check for closeness
+    if torch.allclose(ref_result, out_cpu, rtol=1e-4, atol=1e-6):
+        print("CUDA output matches reference implementation.")
+    else:
+        max_diff = torch.max(torch.abs(ref_result - out_cpu))
+        print("Mismatch detected. Max difference:", max_diff.item())
+
+    # Print sample values from both for visual inspection
+    print("\nFirst 10 values from CPU version:")
+    print(ref_result[:10].numpy())
+
+    print("\nFirst 10 values from CUDA version:")
+    print(out_cpu[:10].numpy())
+
 
 if __name__ == "__main__":
     import argparse
+    import sys
     from omegaconf import OmegaConf
 
-    #test_gaussian_call()
+    #compare_gaussian_cpu_to_gpu()
     #sys.exit(0)
-
-    #nvtx.range_push("STARTUP")
-    #import time
-    #time.sleep(2)  # give it time to be visible in the timeline
-    #nvtx.range_pop()
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True, help="path to the yaml config file")

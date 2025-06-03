@@ -9,7 +9,6 @@ from torch import nn
 
 from torch.cuda import nvtx
 
-
 from diff_gaussian_rasterization import (
     GaussianRasterizationSettings,
     GaussianRasterizer,
@@ -64,38 +63,46 @@ def strip_lowerdiag(L):
 def strip_symmetric(sym):
     return strip_lowerdiag(sym)
 
-def gaussian_3d_coeff(xyzs, covs):
+import os
 
-    xyzs = xyzs.to("cuda")  # profiler output shows that these run on the CPU without these to calls
-    covs = covs.to("cuda")
-    #print(xyzs.device, covs.device)
+USE_CUDA_KERNEL = os.getenv("USE_CUDA_KERNEL", "0") == "1"
+
+if USE_CUDA_KERNEL:
+    from cuda_wrapper import gaussian_3d_coeff_gpu as gaussian_3d_coeff
+else:
+
+    def gaussian_3d_coeff_cpu(xyzs, covs):
+
+        xyzs = xyzs.to("cuda")  # profiler output shows that these run on the CPU without these to calls
+        covs = covs.to("cuda")
+        #print(xyzs.device, covs.device)
     
-    #nvtx.range_push("IN GAUSSIAN_3D_COEFF")
+        #nvtx.range_push("IN GAUSSIAN_3D_COEFF")
 
-    # xyzs: [N, 3]
-    # covs: [N, 6]
-    x, y, z = xyzs[:, 0], xyzs[:, 1], xyzs[:, 2]
-    a, b, c, d, e, f = covs[:, 0], covs[:, 1], covs[:, 2], covs[:, 3], covs[:, 4], covs[:, 5]
+        # xyzs: [N, 3]
+        # covs: [N, 6]
+        x, y, z = xyzs[:, 0], xyzs[:, 1], xyzs[:, 2]
+        a, b, c, d, e, f = covs[:, 0], covs[:, 1], covs[:, 2], covs[:, 3], covs[:, 4], covs[:, 5]
 
-    # eps must be small enough !!!
-    inv_det = 1 / (a * d * f + 2 * e * c * b - e**2 * a - c**2 * d - b**2 * f + 1e-24)
-    inv_a = (d * f - e**2) * inv_det
-    inv_b = (e * c - b * f) * inv_det
-    inv_c = (e * b - c * d) * inv_det
-    inv_d = (a * f - c**2) * inv_det
-    inv_e = (b * c - e * a) * inv_det
-    inv_f = (a * d - b**2) * inv_det
+        # eps must be small enough !!!
+        inv_det = 1 / (a * d * f + 2 * e * c * b - e**2 * a - c**2 * d - b**2 * f + 1e-24)
+        inv_a = (d * f - e**2) * inv_det
+        inv_b = (e * c - b * f) * inv_det
+        inv_c = (e * b - c * d) * inv_det
+        inv_d = (a * f - c**2) * inv_det
+        inv_e = (b * c - e * a) * inv_det
+        inv_f = (a * d - b**2) * inv_det
 
-    power = -0.5 * (x**2 * inv_a + y**2 * inv_d + z**2 * inv_f) - x * y * inv_b - x * z * inv_c - y * z * inv_e
+        power = -0.5 * (x**2 * inv_a + y**2 * inv_d + z**2 * inv_f) - x * y * inv_b - x * z * inv_c - y * z * inv_e
 
-    power[power > 0] = -1e10 # abnormal values... make weights 0
+        power[power > 0] = -1e10 # abnormal values... make weights 0
     
-    exp = torch.exp(power)
+        exp = torch.exp(power)
     
-    torch.cuda.synchronize()
-    nvtx.range_pop()
+        torch.cuda.synchronize()
+        nvtx.range_pop()
 
-    return exp
+        return exp
 
 def build_rotation(r):
     norm = torch.sqrt(r[:,0]*r[:,0] + r[:,1]*r[:,1] + r[:,2]*r[:,2] + r[:,3]*r[:,3])

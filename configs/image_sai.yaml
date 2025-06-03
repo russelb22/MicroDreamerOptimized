@@ -106,6 +106,6 @@ even_view: True
 profiling:
   enabled: true
   mode: "nvtx"     # choices: ["none", "torch", "nvtx"]
-  scope: "broad"    # choices: ["broad", "function"]
+  scope: "function"    # choices: ["broad", "function"]
   output_dir: "logdir/profiler"
   skip_postprocessing: true
