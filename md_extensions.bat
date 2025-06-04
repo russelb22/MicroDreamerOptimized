@@ -18,7 +18,7 @@ set DISTUTILS_USE_SDK=1
 
 echo.
 echo ========================================
-echo pip install setuptools numpy ninja - may already be installed
+echo pip install setuptools numpy ninja (note that these may already be installed)
 echo ========================================
 
 pip install setuptools numpy ninja
