@@ -386,60 +386,60 @@ class GaussianModel:
             # occ is already on CUDA
             kiui.lo(occ, verbose=1)
             return occ
+        else:
+            # ---------------------------------------------------------------------
+            # FALLBACK: pure-Python version (original triple-loop)
+            # ---------------------------------------------------------------------
+            device = opacities.device
+            occ = torch.zeros([resolution, resolution, resolution], dtype=torch.float32, device=device)
 
-        # ---------------------------------------------------------------------
-        # FALLBACK: pure-Python version (original triple-loop)
-        # ---------------------------------------------------------------------
-        device = opacities.device
-        occ = torch.zeros([resolution, resolution, resolution], dtype=torch.float32, device=device)
+            X = torch.linspace(-1.0, 1.0, resolution).split(split_size)
+            Y = torch.linspace(-1.0, 1.0, resolution).split(split_size)
+            Z = torch.linspace(-1.0, 1.0, resolution).split(split_size)
 
-        X = torch.linspace(-1.0, 1.0, resolution).split(split_size)
-        Y = torch.linspace(-1.0, 1.0, resolution).split(split_size)
-        Z = torch.linspace(-1.0, 1.0, resolution).split(split_size)
+            for xi, xs in enumerate(X):
+                for yi, ys in enumerate(Y):
+                    for zi, zs in enumerate(Z):
+                        xx, yy, zz = torch.meshgrid(xs, ys, zs, indexing="ij")
+                        pts = torch.stack(
+                            [xx.reshape(-1), yy.reshape(-1), zz.reshape(-1)],
+                            dim=1
+                        ).to(device)  # [M, 3]
+                        vmin = pts.amin(0) - block_size * relax_ratio
+                        vmax = pts.amax(0) + block_size * relax_ratio
+                        mask_block = (xyzs < vmax).all(-1) & (xyzs > vmin).all(-1)
+                        if not mask_block.any():
+                            continue
 
-        for xi, xs in enumerate(X):
-            for yi, ys in enumerate(Y):
-                for zi, zs in enumerate(Z):
-                    xx, yy, zz = torch.meshgrid(xs, ys, zs, indexing="ij")
-                    pts = torch.stack(
-                        [xx.reshape(-1), yy.reshape(-1), zz.reshape(-1)],
-                        dim=1
-                    ).to(device)  # [M, 3]
-                    vmin = pts.amin(0) - block_size * relax_ratio
-                    vmax = pts.amax(0) + block_size * relax_ratio
-                    mask_block = (xyzs < vmax).all(-1) & (xyzs > vmin).all(-1)
-                    if not mask_block.any():
-                        continue
+                        mask_xyzs = xyzs[mask_block]   # [L, 3]
+                        mask_covs = covs[mask_block]   # [L, 6]
+                        mask_opas = opacities[mask_block].view(1, -1)  # [1, L]
 
-                    mask_xyzs = xyzs[mask_block]   # [L, 3]
-                    mask_covs = covs[mask_block]   # [L, 6]
-                    mask_opas = opacities[mask_block].view(1, -1)  # [1, L]
+                        g_pts = pts.unsqueeze(1).repeat(1, mask_covs.shape[0], 1) - mask_xyzs.unsqueeze(0)  # [M, L, 3]
+                        g_covs = mask_covs.unsqueeze(0).repeat(pts.shape[0], 1, 1)                          # [M, L, 6]
 
-                    g_pts = pts.unsqueeze(1).repeat(1, mask_covs.shape[0], 1) - mask_xyzs.unsqueeze(0)  # [M, L, 3]
-                    g_covs = mask_covs.unsqueeze(0).repeat(pts.shape[0], 1, 1)                          # [M, L, 6]
+                        batch_g = 1024
+                        val = 0.0
+                        for start in range(0, g_covs.shape[1], batch_g):
+                            end = min(start + batch_g, g_covs.shape[1])
 
-                    batch_g = 1024
-                    val = 0.0
-                    for start in range(0, g_covs.shape[1], batch_g):
-                        end = min(start + batch_g, g_covs.shape[1])
+                            nvtx.range_push("GAUSSIAN_3D_COEFF")
+                            w = gaussian_3d_coeff(
+                                g_pts[:, start:end].reshape(-1, 3),
+                                g_covs[:, start:end].reshape(-1, 6)
+                            ).reshape(pts.shape[0], -1)  # [M, l]
+                            nvtx.range_pop()
 
-                        nvtx.range_push("GAUSSIAN_3D_COEFF")
-                        w = gaussian_3d_coeff(
-                            g_pts[:, start:end].reshape(-1, 3),
-                            g_covs[:, start:end].reshape(-1, 6)
-                        ).reshape(pts.shape[0], -1)  # [M, l]
-                        nvtx.range_pop()
+                            val += (mask_opas[:, start:end] * w).sum(-1)
 
-                        val += (mask_opas[:, start:end] * w).sum(-1)
+                        occ[
+                            xi * split_size: xi * split_size + len(xs),
+                            yi * split_size: yi * split_size + len(ys),
+                            zi * split_size: zi * split_size + len(zs)
+                        ] = val.reshape(len(xs), len(ys), len(zs))
 
-                    occ[
-                        xi * split_size: xi * split_size + len(xs),
-                        yi * split_size: yi * split_size + len(ys),
-                        zi * split_size: zi * split_size + len(zs)
-                    ] = val.reshape(len(xs), len(ys), len(zs))
-
-        kiui.lo(occ, verbose=1)
-        return occ
+            kiui.lo(occ, verbose=1)
+            return occ
 
     def extract_mesh(self, path, density_thresh=1, resolution=128, decimate_target=1e5):
 
