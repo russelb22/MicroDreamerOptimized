@@ -39,7 +39,7 @@ REM Check if the first argument is -profile
 IF "%1" == "-profile" (
     echo [INFO] Running with Nsight Systems NVTX profiling...
     echo [INFO] Output file: %OUTPUT_FILE%.nsys-rep
-
+    
     nsys profile ^
         --trace=cuda,nvtx ^
         --sample=none ^

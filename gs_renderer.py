@@ -325,7 +325,10 @@ class GaussianModel:
 
         os.makedirs(os.path.dirname(path), exist_ok=True)
 
+        # profiling extract_fields
+        nvtx.range_push("EXTRACT_FIELDS")
         occ = self.extract_fields(resolution).detach().cpu().numpy()
+        nvtx.range_pop()
 
         #print(f"[DEBUG] Extracting mesh with {self.num_points} points")
 

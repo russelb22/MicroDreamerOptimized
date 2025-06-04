@@ -807,39 +807,43 @@ class GUI:
         #self.save_mesh()
         
 
-import cuda_kernels
+import os
 
-def compare_gaussian_cpu_to_gpu():
-    N = 100000
-    torch.manual_seed(42)  # Ensures reproducibility
+USE_CUDA_KERNEL = os.getenv("USE_CUDA_KERNEL", "0") == "1"
 
-    # Generate identical input data for both CPU and GPU
-    xyzs = torch.randn(N, 3, dtype=torch.float32)
-    covs = torch.randn(N, 6, dtype=torch.float32)
+if USE_CUDA_KERNEL:
+    import cuda_kernels
+    def compare_gaussian_cpu_to_gpu():
+        N = 100000
+        torch.manual_seed(42)  # Ensures reproducibility
 
-    # CPU (reference) version
-    ref_result = gaussian_3d_coeff(xyzs, covs).cpu()
+        # Generate identical input data for both CPU and GPU
+        xyzs = torch.randn(N, 3, dtype=torch.float32)
+        covs = torch.randn(N, 6, dtype=torch.float32)
 
-    # GPU (CUDA kernel) version
-    xyzs_cuda = xyzs.to('cuda').contiguous()
-    covs_cuda = covs.to('cuda').contiguous()
-    out = torch.empty(N, device='cuda', dtype=torch.float32)
-    cuda_kernels.gaussian_3d_launcher(xyzs_cuda, covs_cuda, out)
-    out_cpu = out.cpu()
+        # CPU (reference) version
+        ref_result = gaussian_3d_coeff(xyzs, covs).cpu()
 
-    # Check for closeness
-    if torch.allclose(ref_result, out_cpu, rtol=1e-4, atol=1e-6):
-        print("CUDA output matches reference implementation.")
-    else:
-        max_diff = torch.max(torch.abs(ref_result - out_cpu))
-        print("Mismatch detected. Max difference:", max_diff.item())
+        # GPU (CUDA kernel) version
+        xyzs_cuda = xyzs.to('cuda').contiguous()
+        covs_cuda = covs.to('cuda').contiguous()
+        out = torch.empty(N, device='cuda', dtype=torch.float32)
+        cuda_kernels.gaussian_3d_launcher(xyzs_cuda, covs_cuda, out)
+        out_cpu = out.cpu()
 
-    # Print sample values from both for visual inspection
-    print("\nFirst 10 values from CPU version:")
-    print(ref_result[:10].numpy())
+        # Check for closeness
+        if torch.allclose(ref_result, out_cpu, rtol=1e-4, atol=1e-6):
+            print("CUDA output matches reference implementation.")
+        else:
+            max_diff = torch.max(torch.abs(ref_result - out_cpu))
+            print("Mismatch detected. Max difference:", max_diff.item())
 
-    print("\nFirst 10 values from CUDA version:")
-    print(out_cpu[:10].numpy())
+        # Print sample values from both for visual inspection
+        print("\nFirst 10 values from CPU version:")
+        print(ref_result[:10].numpy())
+
+        print("\nFirst 10 values from CUDA version:")
+        print(out_cpu[:10].numpy())
 
 
 if __name__ == "__main__":
