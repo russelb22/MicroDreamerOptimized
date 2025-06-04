@@ -33,7 +33,7 @@ warmup_rgb_loss: False
 # training batch size per iter
 batch_size: 8
 # training iterations for stage 1
-iters: 500
+iters: 20
 # whether to linearly anneal timestep
 anneal_timestep: True
 # training iterations for stage 2
@@ -85,8 +85,8 @@ texture_lr: 0.2
 
 
 ### addtional
-denoise_steps: 499
-total_steps: 500
+denoise_steps: 20
+total_steps: 21
 t_start: 0.9
 t_end: 0.2
 steps_max: 15
@@ -108,4 +108,4 @@ profiling:
   mode: "nvtx"     # choices: ["none", "torch", "nvtx"]
   scope: "function"    # choices: ["broad", "function"]
   output_dir: "logdir/profiler"
-  skip_postprocessing: false
+  skip_postprocessing: true
