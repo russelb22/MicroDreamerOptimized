@@ -15,6 +15,11 @@ echo ========================================
 pip cache purge
 
 echo.
+echo *************
+echo Make Sure you run conda activate
+echo *************
+
+echo.
 echo ========================================
 echo Uninstalling any previously installed torch stack...
 echo ========================================

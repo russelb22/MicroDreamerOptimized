@@ -803,10 +803,11 @@ class GUI:
         #if not (opt.profiling.enabled and opt.profiling.get("skip_postprocessing", False)):
         print("[DEBUG] calling save_model which should call gaussian_3D_coeff, which has been put onto CUDA")
         #self.save_model(mode='model')
-        #self.save_mesh()
         self.save_model(mode='geo+tex')
+        #self.save_mesh()
+        
 
-import cuda_kernels  # This is your newly compiled extension
+import cuda_kernels
 
 def compare_gaussian_cpu_to_gpu():
     N = 100000
@@ -861,6 +862,8 @@ if __name__ == "__main__":
 
     print("Profiling Mode:", opt.profiling.mode)
     print("[DEBUG] Profiling config after CLI merge:", opt.profiling)
+    print("[DEBUG] Iters specified:", opt.iters)
+    print("[DEBUG] Total_steps specified:", opt.total_steps)
 
     if opt.gui:
         nvtx_push_broad(opt, "RENDER_TOP_LEVEL")
@@ -876,8 +879,9 @@ if __name__ == "__main__":
 
     #lets just focus on training for now by using the skip_postprocessing=true command line argument
     if not (opt.profiling.enabled and opt.profiling.get("skip_postprocessing", False)):
-        nvtx.range_push("save_image")
+        #nvtx.range_push("save_image")
+        print("calling gui.save_image")
         gui.save_image(f'./test_dirs/work_dirs/{opt.save_path}',num=8)
-        nvtx.range_pop()
+        #nvtx.range_pop()
 
         gui.save_video(f'./test_dirs/work_dirs/{opt.save_path}/video.mp4')

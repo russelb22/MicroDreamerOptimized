@@ -99,3 +99,11 @@ eta: 0.0
 batch_size_max: 4
 batch_size_min: 4
 even_view: True
+
+# Profiling
+profiling:
+  enabled: true
+  mode: "nvtx"     # choices: ["none", "torch", "nvtx"]
+  scope: "function"    # choices: ["broad", "function"]
+  output_dir: "logdir/profiler"
+  skip_postprocessing: false

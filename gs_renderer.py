@@ -70,8 +70,7 @@ USE_CUDA_KERNEL = os.getenv("USE_CUDA_KERNEL", "0") == "1"
 if USE_CUDA_KERNEL:
     from cuda_wrapper import gaussian_3d_coeff_gpu as gaussian_3d_coeff
 else:
-
-    def gaussian_3d_coeff_cpu(xyzs, covs):
+    def gaussian_3d_coeff(xyzs, covs):
 
         xyzs = xyzs.to("cuda")  # profiler output shows that these run on the CPU without these to calls
         covs = covs.to("cuda")

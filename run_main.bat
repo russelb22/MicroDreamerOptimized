@@ -31,9 +31,9 @@ if not exist %BASE_OUTPUT_DIR% (
 )
 
 REM Enable (1) or Disable (0) CUDA kernel
-set [INFO]USE_CUDA_KERNEL=0
+set USE_CUDA_KERNEL=1
 
-echo USE_CUDA_KERNEL=%USE_CUDA_KERNEL%
+echo [INFO]USE_CUDA_KERNEL=%USE_CUDA_KERNEL%
 
 REM Check if the first argument is -profile
 IF "%1" == "-profile" (
@@ -52,8 +52,7 @@ IF "%1" == "-profile" (
         --profiling.enabled=true ^
         --profiling.mode=nvtx ^
         --profiling.scope=function ^
-        --profiling.skip_postprocessing=true ^
-        --iters 20
+        --iters=20
 ) ELSE (
     echo [INFO] Running without profiling...
 
@@ -62,5 +61,5 @@ IF "%1" == "-profile" (
         --input test_data/05_objaverse_backpack_rgba.png ^
         --save_path 05_objaverse_backpack_rgba ^
         --profiling.enabled false ^
-        --iters 20
+        --iters 500
 )
