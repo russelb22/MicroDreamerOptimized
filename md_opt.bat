@@ -17,7 +17,6 @@ IF NOT DEFINED CONDA_DEFAULT_ENV (
     exit /b 1
 )
 
-
 echo ========================================
 echo Fixing corrupted numpy installation...
 echo ========================================
@@ -30,11 +29,6 @@ echo ========================================
 echo Clearing pip cache...
 echo ========================================
 pip cache purge
-
-echo.
-echo *************
-echo Make Sure you run conda activate
-echo *************
 
 echo.
 echo ========================================

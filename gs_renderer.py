@@ -78,8 +78,6 @@ else:
         xyzs = xyzs.to("cuda")  # profiler output shows that these run on the CPU without these to calls
         covs = covs.to("cuda")
         #print(xyzs.device, covs.device)
-    
-        #nvtx.range_push("IN GAUSSIAN_3D_COEFF")
 
         # xyzs: [N, 3]
         # covs: [N, 6]
@@ -102,7 +100,6 @@ else:
         exp = torch.exp(power)
     
         torch.cuda.synchronize()
-        nvtx.range_pop()
 
         return exp
 
@@ -268,7 +265,8 @@ class GaussianModel:
         covs = self.covariance_activation(stds, 1.0, self._rotation[mask])
 
         if USE_CUDA_KERNEL:
-            print("ENTER USE_CUDA_KERNEL IF block in extract_mesh")
+            nvtx.range_push("EXTRACT_FIELDS_GPU")
+            print(">>> PUSH EXTRACT_FIELDS_GPU")
             # Convert (a, b, c, d, e, f) covariance to (inv_a, inv_b, inv_c, inv_d, inv_e, inv_f)
             # using the same formula as in gaussian_3d_coeff_gpu
             a = covs[:, 0]
@@ -293,7 +291,7 @@ class GaussianModel:
             opas = opacities.squeeze(1)
 
             # Call fused CUDA kernel; returns [resolution, resolution, resolution]
-            print("CALLING in extract_fields_gpu")
+ 
             occ = extract_fields_gpu(
                 xyzs,
                 inv_cov6,
@@ -302,11 +300,15 @@ class GaussianModel:
                 num_blocks,
                 relax_ratio
             )
-            # occ is already on CUDA
+            torch.cuda.synchronize() 
+            nvtx.range_pop() #("EXTRACT_FIELDS_GPU")
+            print(">>> POP  EXTRACT_FIELDS_GPU")
+            
             kiui.lo(occ, verbose=1)
             return occ
         else:
-            print("ENTER USE_CUDA_KERNEL ELSE block in extract_mesh")
+            print("ENTER USE_CUDA_KERNEL ELSE block in extract_fields")
+            nvtx.range_push("EXTRACT_FIELDS_CPU")
             # ---------------------------------------------------------------------
             # FALLBACK: pure-Python version (original triple-loop)
             # ---------------------------------------------------------------------
@@ -349,7 +351,7 @@ class GaussianModel:
                                 g_pts[:, start:end].reshape(-1, 3),
                                 g_covs[:, start:end].reshape(-1, 6)
                             ).reshape(pts.shape[0], -1)  # [M, l]
-                            nvtx.range_pop()
+                            nvtx.range_pop() #("GAUSSIAN_3D_COEFF")
 
                             val += (mask_opas[:, start:end] * w).sum(-1)
 
@@ -360,6 +362,8 @@ class GaussianModel:
                         ] = val.reshape(len(xs), len(ys), len(zs))
 
             kiui.lo(occ, verbose=1)
+            nvtx.range_pop() #("EXTRACT_FIELDS_CPU")
+            print("RETURN FROM USE_CUDA_KERNEL ELSE block in extract_fields")
             return occ
 
     def extract_mesh(self, path, density_thresh=1, resolution=128, decimate_target=1e5):
@@ -368,11 +372,7 @@ class GaussianModel:
 
         print("calling extract_fields from within extract_mesh")
         # profiling extract_fields
-        nvtx.range_push("EXTRACT_FIELDS")
         occ = self.extract_fields(resolution).detach().cpu().numpy()
-        nvtx.range_pop()
-
-        #print(f"[DEBUG] Extracting mesh with {self.num_points} points")
 
         import mcubes
         vertices, triangles = mcubes.marching_cubes(occ, density_thresh)
@@ -394,6 +394,7 @@ class GaussianModel:
 
         mesh = Mesh(v=v, f=f, device='cuda')
 
+        print("RETURN extract_mesh")
         return mesh
     
     def get_covariance(self, scaling_modifier = 1):
@@ -897,7 +898,7 @@ class Renderer:
             rotations=rotations,
             cov3D_precomp=cov3D_precomp,
         )
-        #nvtx.range_pop()
+        #nvtx.range_pop() #("GAUSSIAN_RASTERIZER")
         rendered_image = rendered_image.clamp(0, 1)
 
         # Those Gaussians that were frustum culled or had a radius of 0 were not visible.

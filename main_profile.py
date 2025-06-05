@@ -655,7 +655,8 @@ class GUI:
             
             print("calling extract_mesh from within mode == geo+tex block in save_model")
             mesh = self.renderer.gaussians.extract_mesh(path, self.opt.density_thresh)
-
+            print("returned from calling extract_mesh from within mode == geo+tex block in save_model")
+            
             # perform texture extraction
             print(f"[INFO] unwrap uv...")
             h = w = texture_size
