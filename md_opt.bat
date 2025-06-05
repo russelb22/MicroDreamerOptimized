@@ -1,6 +1,23 @@
 @echo off
 setlocal enabledelayedexpansion
 
+REM ------------------------------------------------
+REM 1) Verify that we are inside the "pynerf2" Conda env
+REM ------------------------------------------------
+
+REM Check if CONDA_DEFAULT_ENV is defined at all
+IF NOT DEFINED CONDA_DEFAULT_ENV (
+    echo.
+    echo ======================================================
+    echo ERROR: You are not inside any Conda environment.
+    echo Please run:
+    echo   conda activate C:\conda\pynerf2
+    echo before running this script.
+    echo ======================================================
+    exit /b 1
+)
+
+
 echo ========================================
 echo Fixing corrupted numpy installation...
 echo ========================================

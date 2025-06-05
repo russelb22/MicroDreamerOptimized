@@ -31,7 +31,7 @@ if not exist %BASE_OUTPUT_DIR% (
 )
 
 REM Enable (1) or Disable (0) CUDA kernel
-set USE_CUDA_KERNEL=1
+set USE_CUDA_KERNEL=0
 
 echo [INFO]USE_CUDA_KERNEL=%USE_CUDA_KERNEL%
 

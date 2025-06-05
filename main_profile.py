@@ -645,11 +645,15 @@ class GUI:
         os.makedirs(self.opt.outdir, exist_ok=True)
         if mode == 'geo':
             path = os.path.join(self.opt.outdir, self.opt.save_path + '_model.ply')
+
+            print("calling extract_mesh from within mode == geo block in save_model")
             mesh = self.renderer.gaussians.extract_mesh(path, self.opt.density_thresh)
             mesh.write_ply(path)
 
         elif mode == 'geo+tex':
             path = os.path.join(self.opt.outdir, self.opt.save_path + '_model.' + self.opt.mesh_format)
+            
+            print("calling extract_mesh from within mode == geo+tex block in save_model")
             mesh = self.renderer.gaussians.extract_mesh(path, self.opt.density_thresh)
 
             # perform texture extraction
