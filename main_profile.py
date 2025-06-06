@@ -976,8 +976,8 @@ if __name__ == "__main__":
     import sys
     from omegaconf import OmegaConf
 
-    compare_extract_fields_cpu_to_gpu()
-    sys.exit()
+    #compare_extract_fields_cpu_to_gpu()
+    #sys.exit()
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True, help="path to the yaml config file")
