@@ -811,10 +811,173 @@ class GUI:
         self.save_model(mode='geo+tex')
         #self.save_mesh()
         
+import os
+import torch
+import math
+
+USE_CUDA_KERNEL = os.getenv("USE_CUDA_KERNEL", "0") == "1"
+
+if USE_CUDA_KERNEL:
+    import cuda_kernels
+
+    def compare_gaussian_cpu_to_gpu():
+        N = 100000
+        torch.manual_seed(42)  # Ensures reproducibility
+
+        # Generate identical input data for both CPU and GPU
+        xyzs = torch.randn(N, 3, dtype=torch.float32)
+        covs = torch.randn(N, 6, dtype=torch.float32)
+
+        # CPU (reference) version: uses the pure-PyTorch fallback
+        ref_result = gaussian_3d_coeff(xyzs, covs).cpu()
+
+        # GPU (CUDA kernel) version
+        xyzs_cuda = xyzs.to('cuda').contiguous()
+        covs_cuda = covs.to('cuda').contiguous()
+        out = torch.empty(N, device='cuda', dtype=torch.float32)
+        cuda_kernels.gaussian_3d_launcher(xyzs_cuda, covs_cuda, out)
+        out_cpu = out.cpu()
+
+        # Check for closeness
+        if torch.allclose(ref_result, out_cpu, rtol=1e-4, atol=1e-6):
+            print("CUDA output matches reference implementation.")
+        else:
+            max_diff = torch.max(torch.abs(ref_result - out_cpu))
+            print("Mismatch detected. Max difference:", max_diff.item())
+
+        # Print sample values from both for visual inspection
+        print("\nFirst 10 values from CPU version:")
+        print(ref_result[:10].numpy())
+
+        print("\nFirst 10 values from CUDA version:")
+        print(out_cpu[:10].numpy())
+
+    def compare_extract_fields_cpu_to_gpu():
+        # Use a small resolution so the pure-PyTorch version is reasonably fast
+        resolution = 16
+        num_blocks = 4   # then split_size = resolution // num_blocks = 4
+        relax_ratio = 1.5
+
+        # Number of Gaussians
+        N0 = 50
+        torch.manual_seed(123)
+
+        # Random Gaussian centers in [-1,1]
+        means = (torch.rand(N0, 3, dtype=torch.float32) * 2.0) - 1.0
+
+        # Build diagonal covariance -> invert to get inv_cov6
+        variances = torch.rand(N0, 3, dtype=torch.float32) * 0.1 + 0.05
+        inv_a = 1.0 / variances[:, 0]
+        inv_b = torch.zeros(N0, dtype=torch.float32)
+        inv_c = torch.zeros(N0, dtype=torch.float32)
+        inv_d = 1.0 / variances[:, 1]
+        inv_e = torch.zeros(N0, dtype=torch.float32)
+        inv_f = 1.0 / variances[:, 2]
+        inv_cov6 = torch.stack([inv_a, inv_b, inv_c, inv_d, inv_e, inv_f], dim=1)
+
+        # Random opacities in [0,1]
+        opacities = torch.rand(N0, dtype=torch.float32)
+
+        # --------------------------------------------
+        # CPU reference with EXACT same culling logic
+        # --------------------------------------------
+        block_size = 2.0 / num_blocks            # each sub-cube width in world coords
+        span = relax_ratio * block_size          # culling threshold
+
+        # Build a grid of voxel centers in [-1,1]
+        #coords = torch.linspace(-1.0, 1.0, resolution)
+        coords = -1.0 + (2 * torch.arange(resolution, dtype=torch.float32) + 1)/resolution
+        xs, ys, zs = torch.meshgrid(coords, coords, coords, indexing='ij')
+        pts = torch.stack([xs.reshape(-1), ys.reshape(-1), zs.reshape(-1)], dim=1)  # [M,3]
+        M = pts.shape[0]  # M = resolution^3
+
+        occ_flat_cpu = torch.zeros(M, dtype=torch.float32)
+
+        # Loop over voxels in pure Python/PyTorch, but with vectorized inner loop over Gaussians
+        # We will do "for each voxel index m, for each i in [0..N0-1], check cull, then accumulate"
+        for m in range(M):
+            fx = pts[m, 0].item()
+            fy = pts[m, 1].item()
+            fz = pts[m, 2].item()
+
+            total = 0.0
+            for i in range(N0):
+                mx = means[i, 0].item()
+                my = means[i, 1].item()
+                mz = means[i, 2].item()
+
+                # Same culling as GPU kernel
+                if abs(fx - mx) > span or abs(fy - my) > span or abs(fz - mz) > span:
+                    continue
+
+                dx = fx - mx
+                dy = fy - my
+                dz = fz - mz
+
+                inv_a_cpu = inv_cov6[i, 0].item()
+                inv_b_cpu = inv_cov6[i, 1].item()
+                inv_c_cpu = inv_cov6[i, 2].item()
+                inv_d_cpu = inv_cov6[i, 3].item()
+                inv_e_cpu = inv_cov6[i, 4].item()
+                inv_f_cpu = inv_cov6[i, 5].item()
+
+                # Mahalanobis squared
+                t0 = dx * inv_a_cpu + dy * inv_b_cpu + dz * inv_c_cpu
+                t1 = dx * inv_b_cpu + dy * inv_d_cpu + dz * inv_e_cpu
+                t2 = dx * inv_c_cpu + dy * inv_e_cpu + dz * inv_f_cpu
+                sq = dx * t0 + dy * t1 + dz * t2
+
+                power = -0.5 * sq
+                if power > 0.0:
+                    continue
+                w = math.exp(power)
+
+                total += w * float(opacities[i].item())
+
+            occ_flat_cpu[m] = total
+
+        occ_cpu = occ_flat_cpu.view(resolution, resolution, resolution)
+
+        # --------------------------------------------
+        # GPU version
+        # --------------------------------------------
+        means_cuda     = means.to('cuda')
+        inv_cov6_cuda  = inv_cov6.to('cuda')
+        opacities_cuda = opacities.to('cuda')
+
+        occ_gpu = cuda_kernels.extract_fields_launcher(
+            means_cuda.contiguous(),
+            inv_cov6_cuda.contiguous(),
+            opacities_cuda.contiguous(),
+            resolution,
+            num_blocks,
+            float(relax_ratio)
+        )
+        occ_gpu_cpu = occ_gpu.cpu()
+
+        # Compare
+        if torch.allclose(occ_cpu, occ_gpu_cpu, rtol=1e-4, atol=1e-6):
+            print("extract_fields GPU output matches CPU reference.")
+        else:
+            diff = torch.abs(occ_cpu - occ_gpu_cpu)
+            max_diff = diff.max()
+            print("Mismatch detected in extract_fields. Max difference:", max_diff.item())
+
+        # Print a sample slice for visual inspection
+        z_slice = resolution // 2
+        print(f"\nCPU occ slice at z={z_slice}:")
+        print(occ_cpu[:, :, z_slice])
+        print(f"\nGPU occ slice at z={z_slice}:")
+        print(occ_gpu_cpu[:, :, z_slice])
+
+
 if __name__ == "__main__":
     import argparse
     import sys
     from omegaconf import OmegaConf
+
+    compare_extract_fields_cpu_to_gpu()
+    sys.exit()
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True, help="path to the yaml config file")

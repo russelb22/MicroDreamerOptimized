@@ -37,9 +37,9 @@ echo [INFO]USE_CUDA_KERNEL=%USE_CUDA_KERNEL%
 
 REM Check if the first argument is -profile
 IF "%1" == "-profile" (
-    echo [INFO] Running with Nsight Systems NVTX profiling...
-    echo [INFO] Output file: %OUTPUT_FILE%.nsys-rep
-    
+    echo [INFO]Running with Nsight Systems NVTX profiling...
+    echo [INFO]Output file: %OUTPUT_FILE%.nsys-rep
+   
     nsys profile ^
         --trace=cuda,nvtx ^
         --sample=none ^
@@ -54,7 +54,7 @@ IF "%1" == "-profile" (
         --profiling.scope=function ^
         --iters=20
 ) ELSE (
-    echo [INFO] Running without profiling...
+    echo [INFO]Running without profiling...
 
     python main_profile.py ^
         --config=configs/image_sai.yaml ^
