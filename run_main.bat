@@ -24,10 +24,10 @@ set OUTPUT_FILE=%BASE_OUTPUT_DIR%\profile_%TIMESTAMP%
 
 REM Add cl.exe location to PATH
 set "PATH=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.42.34433\bin\Hostx64\x86;%PATH%"
-set "PATH=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64;%PATH%"
+REM set "PATH=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64;%PATH%"
 
 REM Add nsys.exe location to PATH
-set "PATH=C:\Program Files\NVIDIA Corporation\Nsight Systems 2023.4.4\target-windows-x64;%PATH%"
+REM set "PATH=C:\Program Files\NVIDIA Corporation\Nsight Systems 2023.4.4\target-windows-x64;%PATH%"
 
 REM Create output directory if it doesn't exist
 if not exist %BASE_OUTPUT_DIR% (
