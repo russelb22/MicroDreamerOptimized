@@ -7,6 +7,9 @@ REM -----------------------------------------------------------------
 REM 1) (Optional) Change into your repo folder if you’re not already there
 REM cd /d C:\3DMLGPU\p1\MicroDreamerOptimized
 
+set KERNEL_NAME=extract_fields_kernel
+REM set KERNEL_NAME=gaussian_3d_coeff_kernel
+
 REM 2) Invoke Nsight Compute:
 ncu ^
     --set full ^                       REM Collect the full default metric set (occupancy, mem BW, etc.)
