@@ -65,16 +65,15 @@ def strip_symmetric(sym):
 
 import os
 
-USE_CUDA_KERNEL = os.getenv("USE_CUDA_KERNEL", "0") == "1"
+# two separate env-vars
+USE_CUDA_GAUSS   = os.getenv("USE_CUDA_GAUSS",   "0") == "1"
+USE_CUDA_EXTRACT = os.getenv("USE_CUDA_EXTRACT", "0") == "1"
 
-if USE_CUDA_KERNEL:
-    from cuda_wrapper import extract_fields_gpu
-
-if USE_CUDA_KERNEL:
+# --- gaussian_3d_coeff setup ---
+if USE_CUDA_GAUSS:
     from cuda_wrapper import gaussian_3d_coeff_gpu as gaussian_3d_coeff
 else:
     def gaussian_3d_coeff(xyzs, covs):
-
         xyzs = xyzs.to("cuda")  # profiler output shows that these run on the CPU without these to calls
         covs = covs.to("cuda")
         #print(xyzs.device, covs.device)
@@ -142,6 +141,8 @@ class BasicPointCloud(NamedTuple):
     colors: np.array
     normals: np.array
 
+# --- extract_fields setup ---
+from cuda_wrapper import extract_fields_gpu
 
 class GaussianModel:
 
@@ -264,9 +265,9 @@ class GaussianModel:
         # Build covs = lower-triangular packed symmetric covariance [N0, 6]
         covs = self.covariance_activation(stds, 1.0, self._rotation[mask])
 
-        if USE_CUDA_KERNEL:
-            nvtx.range_push("EXTRACT_FIELDS_GPU")
+        if USE_CUDA_EXTRACT:
             print(">>> PUSH EXTRACT_FIELDS_GPU")
+            nvtx.range_push("EXTRACT_FIELDS_GPU")
             # Convert (a, b, c, d, e, f) covariance to (inv_a, inv_b, inv_c, inv_d, inv_e, inv_f)
             # using the same formula as in gaussian_3d_coeff_gpu
             a = covs[:, 0]
@@ -319,7 +320,6 @@ class GaussianModel:
             Y = torch.linspace(-1.0, 1.0, resolution).split(split_size)
             Z = torch.linspace(-1.0, 1.0, resolution).split(split_size)
 
-            print("calling triply nested for loop that calls gaussian_3d_coeff in side of ELSE block in extract_mesh")
             for xi, xs in enumerate(X):
                 for yi, ys in enumerate(Y):
                     for zi, zs in enumerate(Z):
@@ -367,7 +367,7 @@ class GaussianModel:
             return occ
 
     def extract_mesh(self, path, density_thresh=1, resolution=128, decimate_target=1e5):
-        print("ENTER extract_mesh")
+        #print("ENTER extract_mesh")
         os.makedirs(os.path.dirname(path), exist_ok=True)
 
         print("calling extract_fields from within extract_mesh")
@@ -394,7 +394,7 @@ class GaussianModel:
 
         mesh = Mesh(v=v, f=f, device='cuda')
 
-        print("RETURN extract_mesh")
+        #print("RETURN extract_mesh")
         return mesh
     
     def get_covariance(self, scaling_modifier = 1):
