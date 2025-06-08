@@ -994,6 +994,9 @@ if __name__ == "__main__":
     print("[DEBUG] Iters specified:", opt.iters)
     print("[DEBUG] Total_steps specified:", opt.total_steps)
 
+    print("START TIMER")
+    t0 = time.perf_counter()
+
     if opt.gui:
         nvtx_push_broad(opt, "RENDER_TOP_LEVEL")
         gui.render()
@@ -1014,3 +1017,6 @@ if __name__ == "__main__":
         #nvtx.range_pop()
 
         gui.save_video(f'./test_dirs/work_dirs/{opt.save_path}/video.mp4')
+    
+    t1 = time.perf_counter()
+    print(f"END TIMER: Total elapsed time: {t1 - t0:.3f} seconds")
