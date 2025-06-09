@@ -1020,3 +1020,10 @@ if __name__ == "__main__":
     
     t1 = time.perf_counter()
     print(f"END TIMER: Total elapsed time: {t1 - t0:.3f} seconds")
+    
+    # Save timing to summary log if RUN_LABEL is set
+    label = os.environ.get("RUN_LABEL", "unnamed_run")
+    summary_path = os.path.join("logdir", "timing_summary.txt")
+    os.makedirs("logdir", exist_ok=True)
+    with open(summary_path, "a") as f:
+        f.write(f"{label}: {t1 - t0:.3f} seconds\n")
