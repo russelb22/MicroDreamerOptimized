@@ -1,5 +1,6 @@
 import os
 import math
+import time
 import numpy as np
 from typing import NamedTuple
 from plyfile import PlyData, PlyElement
@@ -310,7 +311,9 @@ class GaussianModel:
             return occ
         else:
             print("ENTER USE_CUDA_KERNEL ELSE block in extract_fields")
-            nvtx.range_push("EXTRACT_FIELDS_CPU")
+            print("START TIMER for EXTRACT_FIELDS_CPU", flush=True)
+            t0 = time.perf_counter()
+            #nvtx.range_push("EXTRACT_FIELDS_CPU")
             # ---------------------------------------------------------------------
             # FALLBACK: pure-Python version (original triple-loop)
             # ---------------------------------------------------------------------
@@ -362,8 +365,11 @@ class GaussianModel:
                             zi * split_size: zi * split_size + len(zs)
                         ] = val.reshape(len(xs), len(ys), len(zs))
 
-            kiui.lo(occ, verbose=1)
-            nvtx.range_pop() #("EXTRACT_FIELDS_CPU")
+            # Disable logging
+            # kiui.lo(occ, verbose=1)
+            #nvtx.range_pop() #("EXTRACT_FIELDS_CPU")
+            t1 = time.perf_counter()
+            print(f"END TIMER for EXTRACT_FIELDS_CPU: Total elapsed time: {t1 - t0:.3f} seconds", flush=True)
             print("RETURN FROM USE_CUDA_KERNEL ELSE block in extract_fields")
             return occ
 
