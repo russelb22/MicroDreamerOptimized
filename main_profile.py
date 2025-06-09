@@ -975,12 +975,22 @@ if __name__ == "__main__":
     import argparse
     import sys
     from omegaconf import OmegaConf
+    import io
+
+    # Fix Unicode output in Windows console
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
     #compare_extract_fields_cpu_to_gpu()
     #sys.exit()
+    
+    print("[DEBUG] USE_CUDA_GAUSS:", os.environ.get("USE_CUDA_GAUSS"))
+    print("[DEBUG] USE_CUDA_EXTRACT:", os.environ.get("USE_CUDA_EXTRACT"))
+    print("[DEBUG] RUN_LABEL:", os.environ.get("RUN_LABEL"))
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True, help="path to the yaml config file")
+    parser.add_argument("--summary_path", type=str, default=None, help="optional path to summary timing log")
     args, extras = parser.parse_known_args()
 
     # override default config from cli
@@ -994,7 +1004,7 @@ if __name__ == "__main__":
     print("[DEBUG] Iters specified:", opt.iters)
     print("[DEBUG] Total_steps specified:", opt.total_steps)
 
-    print("START TIMER")
+    print("START TIMER", flush=True)
     t0 = time.perf_counter()
 
     if opt.gui:
@@ -1019,11 +1029,11 @@ if __name__ == "__main__":
         gui.save_video(f'./test_dirs/work_dirs/{opt.save_path}/video.mp4')
     
     t1 = time.perf_counter()
-    print(f"END TIMER: Total elapsed time: {t1 - t0:.3f} seconds")
+    print(f"END TIMER: Total elapsed time: {t1 - t0:.3f} seconds", flush=True)
     
     # Save timing to summary log if RUN_LABEL is set
     label = os.environ.get("RUN_LABEL", "unnamed_run")
-    summary_path = os.path.join("logdir", "timing_summary.txt")
-    os.makedirs("logdir", exist_ok=True)
-    with open(summary_path, "a") as f:
-        f.write(f"{label}: {t1 - t0:.3f} seconds\n")
+    if args.summary_path:
+        os.makedirs(os.path.dirname(args.summary_path), exist_ok=True)
+        with open(args.summary_path, "a", encoding="utf-8") as f:
+            f.write(f"{label}: {t1 - t0:.3f} seconds\n")

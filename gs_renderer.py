@@ -305,7 +305,8 @@ class GaussianModel:
             nvtx.range_pop() #("EXTRACT_FIELDS_GPU")
             print(">>> POP  EXTRACT_FIELDS_GPU")
             
-            kiui.lo(occ, verbose=1)
+            # Disable logging
+            # kiui.lo(occ, verbose=1)
             return occ
         else:
             print("ENTER USE_CUDA_KERNEL ELSE block in extract_fields")
