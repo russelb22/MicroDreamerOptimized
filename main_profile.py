@@ -1026,7 +1026,7 @@ if __name__ == "__main__":
         gui.save_image(f'./test_dirs/work_dirs/{opt.save_path}',num=8)
         #nvtx.range_pop()
 
-        gui.save_video(f'./test_dirs/work_dirs/{opt.save_path}/video.mp4')
+        #gui.save_video(f'./test_dirs/work_dirs/{opt.save_path}/video.mp4')
     
     t1 = time.perf_counter()
     print(f"END TIMER: Total elapsed time: {t1 - t0:.3f} seconds", flush=True)
