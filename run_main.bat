@@ -40,8 +40,8 @@ if not exist %BASE_OUTPUT_DIR% (
 )
 
 REM Enable (1) or Disable (0) CUDA kernel
-set USE_CUDA_GAUSS=0
-set USE_CUDA_EXTRACT=0
+set USE_CUDA_GAUSS=1
+set USE_CUDA_EXTRACT=1
 
 echo [INFO]USE_CUDA_EXTRACT=%USE_CUDA_EXTRACT%
 echo [INFO]USE_CUDA_GAUSS=%USE_CUDA_GAUSS%
@@ -66,7 +66,7 @@ IF "%1" == "-profile" (
 ) ELSE (
     echo [INFO]Running without profiling...
 
-    python main.py ^
+    python main_profile.py ^
         --config=configs/image_sai.yaml ^
         --input=test_data/05_objaverse_backpack_rgba.png ^
         --save_path=05_objaverse_backpack_rgba ^

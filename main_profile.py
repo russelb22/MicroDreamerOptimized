@@ -413,7 +413,7 @@ class GUI:
 
                     nvtx_push_broad(opt, f"Loss calculation {self._denoise_step}")
                     loss_my = F.l1_loss(images, target_img.to(images), reduction='sum')/images.shape[0]
-                    nvtx_pop()
+                    nvtx_pop_broad(opt)
 
                     # + torch.prod(torch.tensor(images.shape[1:]))*(1-ssim(images,target_img.to(images)))
                     
