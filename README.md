@@ -2,25 +2,25 @@
 This repository was forked from the original MicroDreamer repository for use in our 3D Machine Learning with GPU Optimization course at the University of Seattle, Washington in the Spring of 2025. The aim of the project was to identify, profile, and optimize Python functions with CUDA extensions.
 
 ## Installation
-
+### 1. Clone & Create Conda Environment
 From a regular command prompt opened as Administrator:
 ```bash
-mkdir C:\mdo
-
-cd C:\mdo
+# choose your installation folder (e.g. C:\mdo)
+mkdir C:\mdo && cd C:\mdo
 
 git clone https://github.com/russelb22/MicroDreamerOptimized 
-
 cd MicroDreamerOptimized
 
 conda env create -f environment.yml
-
 conda activate mdo
-
+```
+### 2. Build MicroDreamerOptimized
+```bash
 install_md_opt.bat
 ```
 
-Steps to build CUDA extensions, start an x64 Native command prompt as Admin  
+### 3. Build CUDA extensions 
+From an x64 Native command prompt as Admin  
 ``` bash
 cd C:\mdo\MicroDreamerOptimized
 
@@ -29,18 +29,19 @@ conda activate mdo
 install_extensions.bat  
 ```
 
-Run the application without profiling since it takes a long time (10-15 mins) to initialize GPU caches the first time the application is run with the following command 
+At this point MDO is installed and CUDA extensions are built
+The application should first be run without profiling since it takes a long time (10-15 mins) to initialize GPU caches on the first run:
+```bash
 run_main.bat  
+```
 
-NOTES:
-1. The application can be run with or without profiling using the batch file run_main.bat
-2. To run with profiling use the -profile flag
-3. Within run_main.bat, set USE_CUDA_GAUSS and USE_CUDA_EXTRACT to 0 or 1 depending on if you want the CUDA versions of the optimized functions to run.
-4. When run with profiling, nsys will generate a .nsys-rep file in the MicroDreamerOptimized/logdir/nsys/*.nsys-rep.n This can be loaded in Nsight Systems.
+### NOTES:
+1. To run with profiling use the -profile flag
+2. Within run_main.bat, set USE_CUDA_GAUSS and USE_CUDA_EXTRACT to 0 or 1 depending on if you want the CUDA versions of the optimized functions to run.
+3. When run with profiling, nsys will generate a .nsys-rep file in the MicroDreamerOptimized/logdir/nsys/*.nsys-rep.n This can be loaded in Nsight Systems.
 
-At this point MD is installed and CUDA extensions are built, so run_main.bat can be used with or without -profile and with USE_CUDA_GAUSS and USE_CUDA_EXTRACT each set to 0 or 1. 
 
-## Usage
+## Usage Notes from Original Repository
 
 Image-to-3D:
 
