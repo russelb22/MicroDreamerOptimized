@@ -1,37 +1,42 @@
 # MicroDreamerOptimized
 This repository was forked from the original MicroDreamer repository for use in our 3D Machine Learning with GPU Optimization course at the University of Seattle, Washington in the Spring of 2025. The aim of the project was to identify, profile, and optimize Python functions with CUDA extensions.
 
-https://github.com/user-attachments/assets/0a99424a-2e7a-47f0-9f0a-b6713b7686b5
-
 ## Installation
 
-From a regular command prompt, run the following command: conda activate C:\conda\pynerf2
+From a regular command prompt opened as Administrator:
+```bash
+mkdir C:\mdo
 
-2. mkdir C:\mdo
-3. cd C:\mdo
-4. git clone https://github.com/russelb22/MicroDreamerOptimized 
-5. cd MicroDreamerOptimized  
-6. run install_md_opt.bat batch file to do the install (takes about 8 minutes):
+cd C:\mdo
+
+git clone https://github.com/russelb22/MicroDreamerOptimized 
+
+cd MicroDreamerOptimized
+
+conda env create -f environment.yml
+
+conda activate mdo
+
 install_md_opt.bat
+```
 
-Steps to build CUDA extension:
-1. Start an x64 Native command prompt as Admin  
-2. Within x64 Native command prompt, execute ‘conda activate C:\conda\pynerf2' 
-3. Run the following batch file to install CUDA extensions  
+Steps to build CUDA extensions, start an x64 Native command prompt as Admin  
+``` bash
+cd C:\mdo\MicroDreamerOptimized
+
+conda activate mdo
+
 install_extensions.bat  
+```
 
 Run the application without profiling since it takes a long time (10-15 mins) to initialize GPU caches the first time the application is run with the following command 
 run_main.bat  
 
 NOTES:
-1. The application can be run using the batch file run_main.bat
-2. To run without profiling do not use the -profile flag
-3. Within run_main.bat, set USE_CUDA_GAUSS and USE_CUDA_EXTRACT to 0 or 1 depending on if you want the CUDA versions of the optimized functions to run
-
-Running with profiling
-1. Once the application is run once then it can be run with profiling as follows:  
-run_main.bat -profile  
-2. This will generate a .nsys-rep file in the MicroDreamerOptimized/logdir/nsys/*.nsys-rep which can be loaded in Nsight Systems 
+1. The application can be run with or without profiling using the batch file run_main.bat
+2. To run with profiling use the -profile flag
+3. Within run_main.bat, set USE_CUDA_GAUSS and USE_CUDA_EXTRACT to 0 or 1 depending on if you want the CUDA versions of the optimized functions to run.
+4. When run with profiling, nsys will generate a .nsys-rep file in the MicroDreamerOptimized/logdir/nsys/*.nsys-rep.n This can be loaded in Nsight Systems.
 
 At this point MD is installed and CUDA extensions are built, so run_main.bat can be used with or without -profile and with USE_CUDA_GAUSS and USE_CUDA_EXTRACT each set to 0 or 1. 
 
@@ -52,7 +57,7 @@ python process.py test_data
 
 ### training gaussian stage
 # train 20 iters and export ckpt & coarse_mesh to logs
-python main.py --config configs/image_sai.yaml input=test_data/name_rgba.png save_path=name_rgba
+python main_profile.py --config configs/image_sai.yaml input=test_data/name_rgba.png save_path=name_rgba
 
 ### training mesh stage
 # auto load coarse_mesh and refine 3 iters, export fine_mesh to logs
