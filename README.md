@@ -4,6 +4,7 @@ This repository was forked from the original MicroDreamer repository for use in 
 https://github.com/user-attachments/assets/0a99424a-2e7a-47f0-9f0a-b6713b7686b5
 
 ## Installation
+
 From a regular command prompt, run the following command: conda activate C:\conda\pynerf2  
 2. mkdir C:\mdo
 3. cd C:\mdo
