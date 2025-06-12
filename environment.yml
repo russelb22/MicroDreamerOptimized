@@ -1,0 +1,57 @@
+name: mdo
+channels:
+  - defaults
+dependencies:
+  - python=3.10.16
+  - mkl_random=1.2.8
+  - mkl_fft=1.3.11
+  - requests=2.32.3
+  - charset-normalizer=3.3.2
+  - blas=1.0
+  - wheel=0.45.1
+  - mkl-service=2.4.0
+  - sqlite=3.45.3
+  - zlib=1.2.13
+  - lerc=4.0.0
+  - tbb=2021.8.0
+  - zstd=1.5.6
+  - openssl=3.0.16
+  - brotli-python=1.0.9
+  - pillow=11.1.0
+  - libpng=1.6.39
+  - jpeg=9e
+  - lcms2=2.16
+  - lz4-c=1.9.4
+  - cudatoolkit=11.3.1
+  - certifi=2025.4.26
+  - libtiff=4.7.0
+  - libwebp-base=1.3.2
+  - xz=5.6.4
+  - setuptools=72.1.0
+  - tk=8.6.14
+  - intel-openmp=2023.1.0
+  - libffi=3.4.4
+  - pip=25.0
+  - openjpeg=2.5.2
+  - libuv=1.48.0
+  - mkl=2023.1.0
+  - bzip2=1.0.8
+  - libdeflate=1.22
+  - freeglut=3.4.0
+  - vc=14.42
+  - freetype=2.13.3
+  - idna=3.7
+
+  # PyTorch packages
+  - pytorch=1.12.0          # pick the match for your CUDA/toolkit
+  - torchvision=0.12.0
+  - torchaudio=0.11.0
+
+  # Windows/UCRT runtime bits
+  - vs2015_runtime
+  - win_inet_pton
+  - pysocks
+
+  # If you need any pip‐only packages:
+  # - pip:
+  #   - some-package
