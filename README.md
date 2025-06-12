@@ -1,54 +1,41 @@
-# MicroDreamer
-Official implementation of *[MicroDreamer: Zero-shot 3D Generation in ~20 Seconds by Score-based Iterative Reconstruction](http://arxiv.org/abs/2404.19525)*.
-
-
-
+# MicroDreamerOptimized
+This repository was forked from the original MicroDreamer repository for use in our 3D Machine Learning with GPU Optimization course at the University of Seattle, Washington in the Spring of 2025. The aim of the project was to identify, profile, and optimize Python functions with CUDA extensions.
 
 https://github.com/user-attachments/assets/0a99424a-2e7a-47f0-9f0a-b6713b7686b5
 
-
-
-## News
-[10/2024] Add a new mesh export method from [LGM](https://github.com/3DTopia/LGM)
-
-
 ## Installation
+# From a regular command prompt, run the following command: conda activate C:\conda\pynerf2  
 
-The codebase is built on [DreamGaussian](https://github.com/dreamgaussian/dreamgaussian). For installation, 
-```bash
-conda create -n MicroDreamer python=3.11
-conda activate MicroDreamer
+mkdir C:\3DMLGPU\p1
 
-pip install -r requirements.txt
+cd C:\3DMLGPU\p1  
 
-# a modified gaussian splatting (+ depth, alpha rendering)
-git clone --recursive https://github.com/ashawkey/diff-gaussian-rasterization
-pip install ./diff-gaussian-rasterization
+git clone https://github.com/russelb22/MicroDreamerOptimized 
 
-# The commit hash we used
-# d986da0d4cf2dfeb43b9a379b6e9fa0a7f3f7eea
+cd MicroDreamerOptimized  
 
-# simple-knn
-pip install ./simple-knn
+# run install_md_opt.bat batch file to do the install (takes about 8 minutes) 
+install_md_opt.bat
 
-# nvdiffrast
-pip install git+https://github.com/NVlabs/nvdiffrast/
+# Steps to build CUDA extension start an x64 Native command prompt as Admin  
+# Within x64 Native command prompt, execute ‘conda activate C:\conda\pynerf2' 
 
-# The version we used
-# pip install git+https://github.com/NVlabs/nvdiffrast/@0.3.1
+# Run the following batch file to install CUDA extensions  
+install_extensions.bat  
 
-# kiuikit
-pip install git+https://github.com/ashawkey/kiuikit/
+# Run the application without profiling since it takes a long time (10-15 mins) to initialize GPU caches the first time the application is run with the following command 
+run_main.bat  
 
-# The version we used
-# pip install git+https://github.com/ashawkey/kiuikit/@0.2.3
+# The application can be run using the batch file run_main.bat
+# to run without profiling do not use the -profile flag
+# within run_main.bat, set USE_CUDA_GAUSS and USE_CUDA_EXTRACT to 0 or 1 depending on if you want the CUDA versions of the optimized functions to run
 
-# To use ImageDream, also install:
-pip install git+https://github.com/bytedance/ImageDream/#subdirectory=extern/ImageDream
+# Once the application is run once then it can be run with profiling as follows:  
+run_main.bat -profile  
 
-# The commit hash we used
-# 26c3972e586f0c8d2f6c6b297aa9d792d06abebb
-```
+# This will generate a .nsys-rep file in the MicroDreamerOptimized/logdir/nsys/*.nsys-rep which can be loaded in Nsight Systems 
+
+# At this point MD is installed and CUDA extensions are built, so run_main.bat can be used with or without -profile and with USE_CUDA_GAUSS and USE_CUDA_EXTRACT each set to 0 or 1. 
 
 ## Usage
 
