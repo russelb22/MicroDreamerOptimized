@@ -5,22 +5,35 @@ Original work by ML-GSAI/MicroDreamer, used here under its Apache license.
 
 ## Project Overview and Results - CUDA Optimization Summary
 In this project we used NVIDIA Nsight Systems to profile MicroDreamer and identify pure-Python hotspots worth moving into custom CUDA kernels.
-	**1.	gaussian_3d_coeff()**
-	•	Located in gs_renderer.py, this per-voxel function was highlighted by Nsight as a heavy arithmetic hotspot with no external dependencies.
-	•	We rewrote it as a small CUDA kernel and launched it via PyTorch’s C++ extension API.
-	•	Result: CPU: 252 ms → GPU: 0.112 ms → **≈ 2.24×10¹ speedup.**
+
+**1.	gaussian_3d_coeff()**
+
+  •	Located in gs_renderer.py, this per-voxel function was highlighted by Nsight as a heavy arithmetic hotspot with no external dependencies.
+
+  •	We rewrote it as a small CUDA kernel and launched it via PyTorch’s C++ extension API.
+
+  •	Result: CPU: 252 ms → GPU: 0.112 ms → **≈ 2.24×10¹ speedup.**
+
  
-	**2.	extract_fields()**
-	•	Originally, this triple-nested loop called gaussian_3d_coeff() for every voxel in a 3D grid, costing **17.367 s.**
-	•	We fused the loop and the Gaussian math into one 3D CUDA kernel (one thread per voxel).
-	•	**On the T4 GPU**: 17.367 s → 0.1817 s → **≈ 95.6× speedup.**
+**2.	extract_fields()**
+
+  •	Originally, this triple-nested loop called gaussian_3d_coeff() for every voxel in a 3D grid, costing **17.367 s.**
+
+  •	We fused the loop and the Gaussian math into one 3D CUDA kernel (one thread per voxel).
+  
+  •	**On the T4 GPU**: 17.367 s → 0.1817 s → **≈ 95.6× speedup.**
+
  
-	**3.	Effect of a more powerful GPU**
-	•	Moving from the AWS T4 to an AWS A10G further accelerated our fused kernel to **21.36 ms.**
-	•	**Relative to the original Python version:** 17.367 s → 0.02136 s → **≈ 813× overall speedup.**
+**3.	Effect of a more powerful GPU**
+
+  •	Moving from the AWS T4 to an AWS A10G further accelerated our fused kernel to **21.36 ms.**
+
+  •	**Relative to the original Python version:** 17.367 s → 0.02136 s → **≈ 813× overall speedup.**
+
  
-	**4.	End-to-end comparison**
-	•	If we compare the raw Python extract_fields() time (17.367 s) to the kernel-only execution on the A10G (10.526 ms, measured with NVTX), we see a ≈ **1 650× per-voxel speedup.**
+**4.	End-to-end comparison**
+
+  •	If we compare the raw Python extract_fields() time (17.367 s) to the kernel-only execution on the A10G (10.526 ms, measured with NVTX), we see a ≈ **1 650× per-voxel speedup.**
 
 ## Installation
 ### 1. Clone & Create Conda Environment
@@ -51,7 +64,7 @@ install_extensions.bat 
 ```
 
 At this point MDO is installed and CUDA extensions are built
-The application should first be run without profiling since it takes a long time (10-15 mins) to initialize GPU caches on the first run:
+The application should first be run without profiling since it takes a long time (8-10 mins) to initialize GPU caches on the first run:
 ```bash
 run_main.bat  
 ```
