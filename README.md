@@ -33,8 +33,8 @@ In this project we used NVIDIA Nsight Systems to profile MicroDreamer and identi
  
 **4.	End-to-end comparison**
 
-  •	If we compare the raw Python extract_fields() time (17.367 s) to the kernel-only execution on the A10G (10.526 ms, measured with NVTX), we see a ≈ **1 650× per-voxel speedup.**
-
+  •	If we compare the raw Python extract_fields() time (17.367 s) to the kernel-only execution on the A10G (10.526 ms, measured with NVTX), we see a remarkable ≈ **1 650× overall speedup.**
+  
 ## Installation
 ### 1. Clone & Create Conda Environment
 From a regular command prompt opened as Administrator:
