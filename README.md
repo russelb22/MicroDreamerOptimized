@@ -3,16 +3,24 @@ This repository was forked from the original MicroDreamer repository for use in 
 
 Original work by ML-GSAI/MicroDreamer, used here under its Apache license.
 
-## Project Overview and Results
-In this project we used Nsight Systems to profile the MicroDreamer application and identify Python function hotspots that were good candidates for optimization with a custom CUDA kernel. The function gaussian_3d_coeff(), written in gs_renderer.py, was identified as a hotspot with the profiler and chosen also since it included many arithmetic computations and it was well contained, i.e. it did not contain function calls to other repository functions.
-
-The custom CUDA implementation of this gaussian_3d_coeff() was built and profiled leading to a **22.4 times** speedup. The CPU version of the function ran for 252 milliseconds while the CUDA version ran for 112.51 microseconds.
-
-The second function that we identified for optimization with the function that called gaussian_3d_coeff(), that is, extract_fields(). extract_fields() called gaussian_3d_coeff() hundreds of times within a triply nested for loop that iterated over the 3 dimensions of voxels used to represent that 3D object being optimized by MicroDreamer. The CUDA kernel that was written to optimize extract_fields() fused the triply nested for loop and the computation within gaussian_3d_coeff() into a single kernel function that used a 3D grid of threads, one thread per voxel. The speedup of this kernel function was remarkable, reducing the original 17.367 seconds that extract_fields() took to just 181.67 milliseconds, representing a **95.6 times speedup**.
-
-In order to understand the potential speedup available by simply using a faster GPU setup, we moved our code from the original T4 Nvidia GPU to an A10G Nvidia GPU. Here again we say a remarkable speedup to 21.363 milliseconds. When compared to the original 17.367 seconds, the reduction to 21.363 milliseconds represents a **812.947 times speedup**.
-
-The final comparison we would like to make is between the original CPU based extract_fields() function and the function time of the actual extract_fields() kernel function itself, as opposed to the NVTX ranges we used to measure them. At only 10.526 milliseconds, the extract_fields() kernel ran **1,650 times faster** than the Python function that it replaced.
+## Project Overview and Results - CUDA Optimization Summary
+In this project we used NVIDIA Nsight Systems to profile MicroDreamer and identify pure-Python hotspots worth moving into custom CUDA kernels.
+	**1.	gaussian_3d_coeff()**
+	•	Located in gs_renderer.py, this per-voxel function was highlighted by Nsight as a heavy arithmetic hotspot with no external dependencies.
+	•	We rewrote it as a small CUDA kernel and launched it via PyTorch’s C++ extension API.
+	•	Result: CPU: 252 ms → GPU: 0.112 ms → **≈ 2.24×10¹ speedup.**
+ 
+	**2.	extract_fields()**
+	•	Originally, this triple-nested loop called gaussian_3d_coeff() for every voxel in a 3D grid, costing **17.367 s.**
+	•	We fused the loop and the Gaussian math into one 3D CUDA kernel (one thread per voxel).
+	•	**On the T4 GPU**: 17.367 s → 0.1817 s → **≈ 95.6× speedup.**
+ 
+	**3.	Effect of a more powerful GPU**
+	•	Moving from the AWS T4 to an AWS A10G further accelerated our fused kernel to **21.36 ms.**
+	•	**Relative to the original Python version:** 17.367 s → 0.02136 s → **≈ 813× overall speedup.**
+ 
+	**4.	End-to-end comparison**
+	•	If we compare the raw Python extract_fields() time (17.367 s) to the kernel-only execution on the A10G (10.526 ms, measured with NVTX), we see a ≈ **1 650× per-voxel speedup.**
 
 ## Installation
 ### 1. Clone & Create Conda Environment
