@@ -69,6 +69,16 @@ The application should first be run without profiling since it takes a long time
 run_main.bat  
 ```
 
+### 4. Changes needed to run locally on a Windows machine with a GPU include: 
+
+1. PATH has to include "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.41.34120\bin\Hostx64\x86" or location of cl.exe
+
+2. PATH has to include "C:\Program Files\NVIDIA Corporation\Nsight Systems 2025.3.1\target-windows-x64" or location of nsys.exe
+
+3. pip install numpy==1.26.4 
+
+4. conda install -c conda-forge ninja 
+
 ### NOTES:
 1. To run with profiling use the -profile flag
 2. Within run_main.bat, set USE_CUDA_GAUSS and USE_CUDA_EXTRACT to 0 or 1 depending on if you want the CUDA versions of the optimized functions to run.
