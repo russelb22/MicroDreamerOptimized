@@ -17,7 +17,7 @@ In this project we used NVIDIA Nsight Systems to profile MicroDreamer and identi
  
 **2.	extract_fields()**
 
-  •	Originally, this triple-nested loop called gaussian_3d_coeff() for every voxel in a 3D grid, costing **17.367 s.**
+  •	Originally, this triple-nested loop called gaussian_3d_coeff() for every voxel in the 3D grid, costing **17.367 s.**
 
   •	We fused the loop and the Gaussian math into one 3D CUDA kernel (one thread per voxel).
   
