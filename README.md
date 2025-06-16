@@ -1,5 +1,5 @@
 # MicroDreamerOptimized
-This repository was forked from the original MicroDreamer repository for use in our 3D Machine Learning with GPU Optimization course at the University of Seattle, Washington in the Spring of 2025. The aim of the project was to identify, profile, and optimize Python functions with CUDA extensions.
+This repository was forked from the original MicroDreamer repository for use in our 3D Machine Learning with GPU Optimization course at the University of Washington, Seattle in the Spring of 2025. The aim of the project was to identify, profile, and optimize Python functions with CUDA extensions.
 
 Original work by ML-GSAI/MicroDreamer, used here under its Apache license.
 
