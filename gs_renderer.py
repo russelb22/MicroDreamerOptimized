@@ -1,1034 +1,925 @@
 import os
-import cv2
+import math
 import time
-import tqdm
 import numpy as np
-from diffusers import DDIMScheduler
+from typing import NamedTuple
+from plyfile import PlyData, PlyElement
+
 import torch
-import torch.nn.functional as F
-from torch.cuda import nvtx
-
-import rembg
-import math
-
-from cam_utils import orbit_camera, OrbitCamera
-from gs_renderer import Renderer, MiniCam, gaussian_3d_coeff
-
-from grid_put import mipmap_linear_grid_put_2d
-from mesh import Mesh, safe_normalize
-from torchvision.utils import save_image
-from core.options import config_defaults
-from convert import Converter
-from gs_postprocess import filter_out
-from loss_utils import ssim,lpips
-# from clip_sim import cal_clip_sim
+from torch import nn
 
 from torch.cuda import nvtx
 
-# Global profiler object
-global_profiler = {"broad": None, "function": None}
+from diff_gaussian_rasterization import (
+    GaussianRasterizationSettings,
+    GaussianRasterizer,
+)
+from simple_knn._C import distCUDA2
 
-def is_nvtx(opt):
-    return opt.profiling.enabled and opt.profiling.mode.lower() == "nvtx"
+from sh_utils import eval_sh, SH2RGB, RGB2SH
+from mesh import Mesh
+from mesh_utils import decimate_mesh, clean_mesh
 
-def is_torch(opt):
-    return opt.profiling.enabled and opt.profiling.mode.lower() == "torch"
+import kiui
 
-# --- NVTX helpers ---
+def inverse_sigmoid(x):
+    return torch.log(x/(1-x))
 
-def nvtx_push(opt, fn_name: str, scope: str):
-    #print(f"[DEBUG] NVTX CHECK: enabled={opt.profiling.enabled}, mode={opt.profiling.mode}, scope={opt.profiling.scope}")
-    if is_nvtx(opt) and opt.profiling.scope.lower() == scope:
-        nvtx.range_push(fn_name)
-
-def nvtx_pop(opt, scope: str):
-    if is_nvtx(opt) and opt.profiling.scope.lower() == scope:
-        nvtx.range_pop()
-
-def nvtx_push_broad(opt, fn_name: str):
-    #print(f"[DEBUG] NVTX PUSH BROAD: {fn_name}")
-    nvtx_push(opt, fn_name, "broad")
-
-def nvtx_pop_broad(opt): nvtx_pop(opt, "broad")
-def nvtx_push_function(opt, fn_name: str): nvtx_push(opt, fn_name, "function")
-def nvtx_pop_function(opt): nvtx_pop(opt, "function")
-
-# --- Torch Profiler helpers ---
-
-def torch_profiler_start(opt, scope: str):
-    if is_torch(opt) and opt.profiling.scope.lower() == scope:
-        global_profiler[scope] = torch.profiler.profile(
-            schedule=torch.profiler.schedule(wait=0, warmup=1, active=3, repeat=1),
-            on_trace_ready=torch.profiler.tensorboard_trace_handler(opt.profiling.output_dir),
-            record_shapes=True,
-            with_stack=True,
-        )
-        global_profiler[scope].__enter__()
-        global_profiler[scope].start()
-
-def torch_profiler_step(opt, scope: str):
-    if is_torch(opt) and opt.profiling.scope.lower() == scope:
-        global_profiler[scope].step()
-
-def torch_profiler_stop(opt, scope: str):
-    if is_torch(opt) and opt.profiling.scope.lower() == scope:
-        global_profiler[scope].stop()
-        global_profiler[scope].__exit__(None, None, None)
-        global_profiler[scope] = None
-
-def torch_profiler_start_broad(opt): torch_profiler_start(opt, "broad")
-def torch_profiler_step_broad(opt): torch_profiler_step(opt, "broad")
-def torch_profiler_stop_broad(opt): torch_profiler_stop(opt, "broad")
-
-def torch_profiler_start_function(opt): torch_profiler_start(opt, "function")
-def torch_profiler_step_function(opt): torch_profiler_step(opt, "function")
-def torch_profiler_stop_function(opt): torch_profiler_stop(opt, "function")
-
-class GUI:
-    def __init__(self, opt):
-        self.opt = opt  # shared with the trainer's opt to support in-place modification of rendering parameters.
-        self.W = opt.W
-        self.H = opt.H
-        self.cam = OrbitCamera(opt.W, opt.H, r=opt.radius, fovy=opt.fovy)
-
-        self.mode = "image"
-        self.seed = 0
-
-        self.buffer_image = np.ones((self.W, self.H, 3), dtype=np.float32)
-        self.need_update = True  # update buffer_image
-
-        # models
-        self.device = torch.device("cuda")
-        self.bg_remover = None
-
-        self.guidance_sd = None
-        self.guidance_zero123 = None
-
-        self.enable_sd = False
-        self.enable_zero123 = False
-
-        # renderer
-        self.renderer = Renderer(sh_degree=self.opt.sh_degree)
-        self.gaussain_scale_factor = 1
-
-        # input image
-        self.input_img = None
-        self.input_mask = None
-        self.input_img_torch = None
-        self.input_mask_torch = None
-        self.overlay_input_img = False
-        self.overlay_input_img_ratio = 0.5
-
-        # input text
-        self.prompt = ""
-        self.negative_prompt = ""
-
-        # training stuff
-        self.training = False
-        self.optimizer = None
-        self.step = 0
-        self.train_steps = 1  # steps per rendering loop
-        
-        # load input data from cmdline
-        if self.opt.input is not None:
-            self.load_input(self.opt.input)
-        
-        # override prompt from cmdline
-        if self.opt.prompt is not None:
-            self.prompt = self.opt.prompt
-        if self.opt.negative_prompt is not None:
-            self.negative_prompt = self.opt.negative_prompt
-
-        # override if provide a checkpoint
-        if self.opt.load is not None:
-            self.renderer.initialize(self.opt.load)            
-        else:
-            # initialize gaussians to a blob
-            self.renderer.initialize(num_pts=self.opt.num_pts)
-
-        self.init_3d=True   
-        # self.scheduler=DDIMScheduler(clip_sample=False)
-        import json
-        self.config =json.load(open("./scheduler_config.json"))
-        self.scheduler=DDIMScheduler.from_config(self.config)
-        self.denoise_steps=self.opt.denoise_steps
-        self.scheduler.set_timesteps(self.denoise_steps)
-        self.total_steps=self.opt.total_steps-1
-        self._denoise_step=0
-
-
-    def seed_everything(self):
-        try:
-            seed = int(self.seed)
-        except:
-            seed = np.random.randint(0, 1000000)
-
-        os.environ["PYTHONHASHSEED"] = str(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed(seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = True
-
-        self.last_seed = seed
-    def get_denoise_schedule(self):
-        
-        num_train_timesteps = 1000
-        start = self.denoise_steps*(1-self.opt.t_start)
-        end = self.denoise_steps*(1-self.opt.t_end)
-        # if self.cfg.timesche_type.endswith("linear"):
-        dsp=int((self._denoise_step/self.total_steps)*(end-start)+start)
-
-        t=self.scheduler.timesteps[dsp]
-        return t
-    def get_reconstruct_steps(self):
-        steps_max=self.opt.steps_max
-        steps_min=self.opt.steps_min
-        reconstruct_steps_schedule= self.opt.steps_schedule
-
-        if reconstruct_steps_schedule == 'cosine_up':
-            reconstruct_steps = (-math.cos(self._denoise_step/self.total_steps*math.pi)+1)/2*(
-                steps_max-steps_min)+steps_min
-            
-        elif reconstruct_steps_schedule == 'cosine_down':
-            reconstruct_steps = (math.cos(self._denoise_step/self.total_steps*math.pi)+1)/2*(
-                steps_max-steps_min)+steps_min
-        
-        elif reconstruct_steps_schedule == 'linear':
-            reconstruct_steps = self._denoise_step/self.total_steps * \
-                (steps_max -
-                 steps_min)+steps_min
-        elif reconstruct_steps_schedule == 'cosine_up_then_down':
-            reconstruct_steps = (-math.cos(self._denoise_step/self.total_steps*2*math.pi)+1)/2*(
-                steps_max-steps_min)+steps_min
-
-        else:
-            reconstruct_steps = steps_max
-
-        return int(reconstruct_steps)
-
-    def get_batch_size(self):
-        batch_size_max=self.opt.batch_size_max
-        batch_size_min=self.opt.batch_size_min
-        batch_size = self._denoise_step/self.total_steps * \
-                (batch_size_max -batch_size_min)+batch_size_min
-
-        return int(batch_size)
+def get_expon_lr_func(
+    lr_init, lr_final, lr_delay_steps=0, lr_delay_mult=1.0, max_steps=1000000
+):
     
-    def get_ref_loss(self):
-        ref_loss_max=self.opt.ref_loss
-        ref_loss_min=0.01
-        ref_loss = self._denoise_step/self.total_steps * \
-                (ref_loss_max - ref_loss_min)+ref_loss_min
-
-        return ref_loss
-
-    def prepare_train(self):
-
-        self.step = 0
-
-        # setup training
-        nvtx_push_broad(opt, "GridEncoder Setup")
-        self.renderer.gaussians.training_setup(self.opt)
-        nvtx_pop_broad(opt)
-        # do not do progressive sh-level
-        self.renderer.gaussians.active_sh_degree = self.renderer.gaussians.max_sh_degree
-        self.optimizer = self.renderer.gaussians.optimizer
-
-        # default camera
-        if self.opt.mvdream or self.opt.imagedream:
-            # the second view is the front view for mvdream/imagedream.
-            pose = orbit_camera(self.opt.elevation, 90, self.opt.radius)
+    def helper(step):
+        if lr_init == lr_final:
+            # constant lr, ignore other params
+            return lr_init
+        if step < 0 or (lr_init == 0.0 and lr_final == 0.0):
+            # Disable this parameter
+            return 0.0
+        if lr_delay_steps > 0:
+            # A kind of reverse cosine decay.
+            delay_rate = lr_delay_mult + (1 - lr_delay_mult) * np.sin(
+                0.5 * np.pi * np.clip(step / lr_delay_steps, 0, 1)
+            )
         else:
-            pose = orbit_camera(self.opt.elevation, 0, self.opt.radius)
-        self.fixed_cam = MiniCam(
-            pose,
-            self.opt.ref_size,
-            self.opt.ref_size,
-            self.cam.fovy,
-            self.cam.fovx,
-            self.cam.near,
-            self.cam.far,
-        )
+            delay_rate = 1.0
+        t = np.clip(step / max_steps, 0, 1)
+        log_lerp = np.exp(np.log(lr_init) * (1 - t) + np.log(lr_final) * t)
+        return delay_rate * log_lerp
 
-        self.enable_sd = self.opt.lambda_sd > 0 and self.prompt != ""
-        self.enable_zero123 = self.opt.lambda_zero123 > 0 and self.input_img is not None
+    return helper
 
-        # lazy load guidance model
-        if self.guidance_sd is None and self.enable_sd:
-            if self.opt.mvdream:
-                print(f"[INFO] loading MVDream...")
-                from guidance.mvdream_utils import MVDream
-                self.guidance_sd = MVDream(self.device)
-                print(f"[INFO] loaded MVDream!")
-            elif self.opt.imagedream:
-                print(f"[INFO] loading ImageDream...")
-                from guidance.imagedream_utils import ImageDream
-                self.guidance_sd = ImageDream(self.device)
-                print(f"[INFO] loaded ImageDream!")
 
-        if self.guidance_zero123 is None and self.enable_zero123:
-            print(f"[INFO] loading zero123...")
-            from guidance.zero123_utils import Zero123
-            if self.opt.stable_zero123:
-                self.guidance_zero123 = Zero123(self.device, model_key='ashawkey/stable-zero123-diffusers')
-            else:
-                self.guidance_zero123 = Zero123(self.device, model_key='ashawkey/zero123-xl-diffusers')
-            print(f"[INFO] loaded zero123!")
+def strip_lowerdiag(L):
+    uncertainty = torch.zeros((L.shape[0], 6), dtype=torch.float, device="cuda")
 
-        # input image
-        if self.input_img is not None:
-            self.input_img_torch = torch.from_numpy(self.input_img).permute(2, 0, 1).unsqueeze(0).to(self.device)
-            self.input_img_torch = F.interpolate(self.input_img_torch, (self.opt.ref_size, self.opt.ref_size), mode="bilinear", align_corners=False)
+    uncertainty[:, 0] = L[:, 0, 0]
+    uncertainty[:, 1] = L[:, 0, 1]
+    uncertainty[:, 2] = L[:, 0, 2]
+    uncertainty[:, 3] = L[:, 1, 1]
+    uncertainty[:, 4] = L[:, 1, 2]
+    uncertainty[:, 5] = L[:, 2, 2]
+    return uncertainty
 
-            self.input_mask_torch = torch.from_numpy(self.input_mask).permute(2, 0, 1).unsqueeze(0).to(self.device)
-            self.input_mask_torch = F.interpolate(self.input_mask_torch, (self.opt.ref_size, self.opt.ref_size), mode="bilinear", align_corners=False)
+def strip_symmetric(sym):
+    return strip_lowerdiag(sym)
 
-        # prepare embeddings
-        with torch.no_grad():
-
-            if self.enable_sd:
-                if self.opt.imagedream:
-                    self.guidance_sd.get_image_text_embeds(self.input_img_torch, [self.prompt], [self.negative_prompt])
-                else:
-                    self.guidance_sd.get_text_embeds([self.prompt], [self.negative_prompt])
-
-            if self.enable_zero123:
-                self.guidance_zero123.get_img_embeds(self.input_img_torch)
-
-    def train_step(self):
-        starter = torch.cuda.Event(enable_timing=True)
-        ender = torch.cuda.Event(enable_timing=True)
-        starter.record()
-
-
-        batch_size=self.get_batch_size()
-
-        nvtx_push_broad(opt, "TRAIN_LOOP")
-        for _ in range(self.train_steps):
-            nvtx_push_broad(opt, f"TRAIN_STEP {self._denoise_step}")
-            target_img=None
-
-            self.step += 1
-            step_ratio = min(1, self.step / self.opt.iters)
-
-            # update lr
-            self.renderer.gaussians.update_learning_rate(self.step)
-
-            loss = 0
-
-            ### novel view (manual batch)
-            # render_resolution = 128 if step_ratio < 0.3 else (256 if step_ratio < 0.6 else 512)
-            render_resolution = 256
-            images = []
-            poses = []
-            vers, hors, radii = [], [], []
-            # avoid too large elevation (> 80 or < -80), and make sure it always cover [min_ver, max_ver]
-            min_ver = max(min(self.opt.min_ver, self.opt.min_ver - self.opt.elevation), -80 - self.opt.elevation)
-            max_ver = min(max(self.opt.max_ver, self.opt.max_ver - self.opt.elevation), 80 - self.opt.elevation)
-
-
-            cur_cams = []
-
-            hor_base=np.random.randint(-180, -180+360//batch_size)
-            
-            bg_color = torch.tensor([1, 1, 1] , dtype=torch.float32, device="cuda")
-            
-            for i in range(batch_size):
-
-                # render random view
-                ver = np.random.randint(min_ver, max_ver)
-                hor = np.random.randint(-180, 180)
-                if self.opt.even_view:
-                    hor = hor_base+(360//batch_size)*i
-                radius = 0
-
-                vers.append(ver)
-                hors.append(hor)
-                radii.append(radius)
-
-                pose = orbit_camera(self.opt.elevation + ver, hor, self.opt.radius + radius)
-                poses.append(pose)
-
-                cur_cam = MiniCam(pose, render_resolution, render_resolution, self.cam.fovy, self.cam.fovx, self.cam.near, self.cam.far)
-                cur_cams.append(cur_cam)
-                    
-            poses = torch.from_numpy(np.stack(poses, axis=0)).to(self.device)
-
-            recon_steps=self.get_reconstruct_steps()
-            if self.init_3d:
-                recon_steps=self.opt.init_steps
-            step_t=self.get_denoise_schedule()
-            for _1 in range(recon_steps):
-                final_step = (self._denoise_step == self.total_steps-1) and _1 == (recon_steps-1)
-                self.step += 1
-                step_ratio = min(1, self.step / self.opt.iters)
-
-                # update lr
-                self.renderer.gaussians.update_learning_rate(self.step)
-                loss=0.0
-
-                ### known view
-                if self.input_img_torch is not None and not self.opt.imagedream:
-                    cur_cam = self.fixed_cam
-                    
-                    # rendering views
-                    nvtx_push_broad(opt, "RENDERING")
-                    out = self.renderer.render(cur_cam)
-                    nvtx_pop_broad(opt)
-
-                    # rgb loss
-                    image = out["image"].unsqueeze(0) # [1, 3, H, W] in [0, 1]
-
-                    loss = loss + self.opt.ref_loss * F.l1_loss(image, self.input_img_torch,reduction='sum')
-
-                    # # mask loss
-                    mask = out["alpha"].unsqueeze(0) # [1, 1, H, W] in [0, 1]
-                    loss = loss + self.opt.ref_mask_loss * F.mse_loss(mask, self.input_mask_torch,reduction='sum')
-                images=[]
-                
-                nvtx_push_broad(opt, "RENDERING NOVEL VIEWS")
-                for i, cur_cam in enumerate(cur_cams):
-                    nvtx_push_broad(opt, f"RENDER VIEW {i}")
-                    out = self.renderer.render(cur_cam,bg_color=bg_color)
-                    nvtx_pop_broad(opt)
-                    image=out["image"].unsqueeze(0)
-                    images.append(image)
-                images=torch.cat(images,dim=0)
-                nvtx_pop_broad(opt)
-
-
-                if self.enable_sd:
-                    if self.opt.mvdream or self.opt.imagedream:
-                        nvtx_push_broad(opt, f"GUIDANCE SD step {self._denoise_step}")
-                        target_img = self.guidance_sd.train_step(images, poses, step_ratio=None,guidance_scale=self.opt.cfg,target_img=target_img,step=step_t,init_3d=self.init_3d,iter_steps=self.denoise_steps)
-                        nvtx_pop_broad(opt)
-                        loss_my = F.l1_loss(images, target_img.to(images), reduction='sum')/images.shape[0]
-                        loss = loss + self.opt.lambda_sd * loss_my
-
-                if self.enable_zero123:
-                    nvtx_push_broad(opt, f"GUIDANCE ZERO123 step {self._denoise_step}")
-                    target_img=self.guidance_zero123.train_step(images, vers, hors, radii, step_ratio=None, default_elevation=self.opt.elevation,guidance_scale=self.opt.cfg,target_img=target_img,step=step_t,init_3d=self.init_3d,iter_steps=self.denoise_steps,inverse_ratio=self.opt.inv_r,ddim_eta=self.opt.eta)
-                    nvtx_pop_broad(opt)
-
-                    nvtx_push_broad(opt, f"Loss calculation {self._denoise_step}")
-                    loss_my = F.l1_loss(images, target_img.to(images), reduction='sum')/images.shape[0]
-                    nvtx_pop_broad(opt)
-
-                    # + torch.prod(torch.tensor(images.shape[1:]))*(1-ssim(images,target_img.to(images)))
-                    
-                    loss = loss + self.opt.lambda_zero123 * loss_my
-            
-                # backward pass
-                # print("calling nvtx_push_broad for BACKWARD PASS")
-                nvtx_push_broad(opt, f"BACKWARD PASS step {self._denoise_step}")
-                if torch.is_tensor(loss) and loss.requires_grad:
-                    loss.backward()
-                #else:
-                #    print(f"[WARN] Skipped loss.backward(), loss is type {type(loss)} at step {self._denoise_step}")
-                nvtx_pop_broad(opt)
-
-                # optimize step
-                nvtx_push_broad(opt, f"OPTIMIZER.STEP step {self._denoise_step}")
-                self.optimizer.step()
-                nvtx_pop_broad(opt)
-                
-                nvtx_push_broad(opt, f"OPTIMIZER.ZERO_GRAD step {self._denoise_step}")
-                self.optimizer.zero_grad()
-                nvtx_pop_broad(opt)
-
-                # densify and prune
-                if self.step >= self.opt.density_start_iter and self.step <= self.opt.density_end_iter:
-                    viewspace_point_tensor, visibility_filter, radii = out["viewspace_points"], out["visibility_filter"], out["radii"]
-                    self.renderer.gaussians.max_radii2D[visibility_filter] = torch.max(self.renderer.gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
-                    #self.renderer.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
-                    if viewspace_point_tensor.grad is not None:
-                        self.renderer.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
-                    #else:
-                    #    print(f"[WARN] viewspace_point_tensor.grad is None at step {self.step}, skipping densification stats.")
-
-                    if (self.step % self.opt.densification_interval == 0) or final_step:
-                        self.renderer.gaussians.densify_and_prune(self.opt.densify_grad_threshold, min_opacity=0.005, extent=4, max_screen_size=1)
-                    
-                    
-            self._denoise_step += 1 if not self.init_3d else 0
-            self.init_3d=False
-            nvtx_pop_broad(opt)
-        ender.record()
-        torch.cuda.synchronize()
-        t = starter.elapsed_time(ender)
-
-        self.need_update = True
-        nvtx_pop_broad(opt)
-
-    @torch.no_grad()
-    def test_step(self):
-        # ignore if no need to update
-        if not self.need_update:
-            return
-
-        starter = torch.cuda.Event(enable_timing=True)
-        ender = torch.cuda.Event(enable_timing=True)
-        starter.record()
-
-        # should update image
-        if self.need_update:
-            # render image
-
-            cur_cam = MiniCam(
-                self.cam.pose,
-                self.W,
-                self.H,
-                self.cam.fovy,
-                self.cam.fovx,
-                self.cam.near,
-                self.cam.far,
-            )
-
-            out = self.renderer.render(cur_cam, self.gaussain_scale_factor)
-
-            buffer_image = out[self.mode]  # [3, H, W]
-
-            if self.mode in ['depth', 'alpha']:
-                buffer_image = buffer_image.repeat(3, 1, 1)
-                if self.mode == 'depth':
-                    buffer_image = (buffer_image - buffer_image.min()) / (buffer_image.max() - buffer_image.min() + 1e-20)
-
-            buffer_image = F.interpolate(
-                buffer_image.unsqueeze(0),
-                size=(self.H, self.W),
-                mode="bilinear",
-                align_corners=False,
-            ).squeeze(0)
-
-            self.buffer_image = (
-                buffer_image.permute(1, 2, 0)
-                .contiguous()
-                .clamp(0, 1)
-                .contiguous()
-                .detach()
-                .cpu()
-                .numpy()
-            )
-
-            # display input_image
-            if self.overlay_input_img and self.input_img is not None:
-                self.buffer_image = (
-                    self.buffer_image * (1 - self.overlay_input_img_ratio)
-                    + self.input_img * self.overlay_input_img_ratio
-                )
-
-            self.need_update = False
-
-        ender.record()
-        torch.cuda.synchronize()
-        t = starter.elapsed_time(ender)
-
-
-    
-    def load_input(self, file):
-        # load image
-        print(f'[INFO] load image from {file}...')
-        img = cv2.imread(file, cv2.IMREAD_UNCHANGED)
-        if img.shape[-1] == 3:
-            if self.bg_remover is None:
-                self.bg_remover = rembg.new_session()
-            img = rembg.remove(img, session=self.bg_remover)
-
-        img = cv2.resize(img, (self.W, self.H), interpolation=cv2.INTER_AREA)
-        img = img.astype(np.float32) / 255.0
-
-        self.input_mask = img[..., 3:]
-        # white bg
-        self.input_img = img[..., :3] * self.input_mask + (1 - self.input_mask)
-        # bgr to rgb
-        self.input_img = self.input_img[..., ::-1].copy()
-
-        # load prompt
-        file_prompt = file.replace("_rgba.png", "_caption.txt")
-        if os.path.exists(file_prompt):
-            print(f'[INFO] load prompt from {file_prompt}...')
-            with open(file_prompt, "r") as f:
-                self.prompt = f.read().strip()
-
-
-    @torch.no_grad()
-    def save_video(self, path):
-        import imageio
-        # vers = [0] * 8 + [-45] * 8 + [45] * 8 + [-89.9, 89.9]
-        # hors = [0, 45, -45, 90, -90, 135, -135, 180] * 3 + [0, 0]
-        vers=[0]*120
-        hors=list(range(0,180,3))+list(range(-180,0,3))
-
-        # vers=vers[:8]
-        # hors=hors[:8]
-
-        render_resolution = 512
-
-        import nvdiffrast.torch as dr
-
-        if not self.opt.force_cuda_rast and (not self.opt.gui or os.name == 'nt'):
-            glctx = dr.RasterizeGLContext()
-        else:
-            glctx = dr.RasterizeCudaContext()
-
-        rgbs_ls=[]
-        for ver, hor in zip(vers, hors):
-            # render image
-            pose = orbit_camera(ver, hor, self.cam.radius)
-
-            cur_cam = MiniCam(
-                pose,
-                render_resolution,
-                render_resolution,
-                self.cam.fovy,
-                self.cam.fovx,
-                self.cam.near,
-                self.cam.far,
-            )
-            
-            cur_out = self.renderer.render(cur_cam)
-
-            rgbs = cur_out["image"].unsqueeze(0) # [1, 3, H, W] in [0, 1]
-            rgbs_ls.append(rgbs)
-        
-        rgbs = torch.cat(rgbs_ls, dim=0).permute(0,2,3,1).cpu().numpy()
-        rgbs= [rgbs[i] for i in range(rgbs.shape[0])]
-        imageio.mimsave(path, rgbs, fps=30)
-        
-        # save_image(rgbs,path,padding=0)
-
-    @torch.no_grad()
-    def save_image(self, path,num=8):
-        os.makedirs(path,exist_ok=True)
-        vers=[0]*num
-        hors = np.linspace(-180, 180, num, dtype=np.int32, endpoint=False).tolist()
-
-        # vers=vers[:8]
-        # hors=hors[:8]
-
-        render_resolution = 512
-
-        import nvdiffrast.torch as dr
-
-        if not self.opt.force_cuda_rast and (not self.opt.gui or os.name == 'nt'):
-            glctx = dr.RasterizeGLContext()
-        else:
-            glctx = dr.RasterizeCudaContext()
-
-        rgbs_ls=[]
-        cnt=0
-        for ver, hor in zip(vers, hors):
-            # render image
-            pose = orbit_camera(ver, hor, self.cam.radius)
-
-            cur_cam = MiniCam(
-                pose,
-                render_resolution,
-                render_resolution,
-                self.cam.fovy,
-                self.cam.fovx,
-                self.cam.near,
-                self.cam.far,
-            )
-            
-            cur_out = self.renderer.render(cur_cam)
-
-            rgbs = cur_out["image"] # [3, H, W] in [0, 1]
-            save_image(rgbs,os.path.join(path,f"{cnt}.png"),padding=0)
-            cnt+=1
-
-
-    @torch.no_grad()
-    def save_model(self, mode='geo', texture_size=1024):
-        # assert 0
-        os.makedirs(self.opt.outdir, exist_ok=True)
-        if mode == 'geo':
-            path = os.path.join(self.opt.outdir, self.opt.save_path + '_model.ply')
-
-            print("calling extract_mesh from within mode == geo block in save_model")
-            mesh = self.renderer.gaussians.extract_mesh(path, self.opt.density_thresh)
-            mesh.write_ply(path)
-
-        elif mode == 'geo+tex':
-            path = os.path.join(self.opt.outdir, self.opt.save_path + '_model.' + self.opt.mesh_format)
-            
-            print("calling extract_mesh from within mode == geo+tex block in save_model")
-            mesh = self.renderer.gaussians.extract_mesh(path, self.opt.density_thresh)
-            print("returned from calling extract_mesh from within mode == geo+tex block in save_model")
-            
-            # perform texture extraction
-            print(f"[INFO] unwrap uv...")
-            h = w = texture_size
-            mesh.auto_uv()
-            mesh.auto_normal()
-
-            albedo = torch.zeros((h, w, 3), device=self.device, dtype=torch.float32)
-            cnt = torch.zeros((h, w, 1), device=self.device, dtype=torch.float32)
-
-            # self.prepare_train() # tmp fix for not loading 0123
-            # vers = [0]
-            # hors = [0]
-            vers = [0] * 8 + [-45] * 8 + [45] * 8 + [-89.9, 89.9]
-            hors = [0, 45, -45, 90, -90, 135, -135, 180] * 3 + [0, 0]
-
-            render_resolution = 512
-
-            import nvdiffrast.torch as dr
-
-            if not self.opt.force_cuda_rast and (not self.opt.gui or os.name == 'nt'):
-                glctx = dr.RasterizeGLContext()
-            else:
-                glctx = dr.RasterizeCudaContext()
-
-            for ver, hor in zip(vers, hors):
-                # render image
-                pose = orbit_camera(ver, hor, self.cam.radius)
-
-                cur_cam = MiniCam(
-                    pose,
-                    render_resolution,
-                    render_resolution,
-                    self.cam.fovy,
-                    self.cam.fovx,
-                    self.cam.near,
-                    self.cam.far,
-                )
-                
-                cur_out = self.renderer.render(cur_cam)
-
-                rgbs = cur_out["image"].unsqueeze(0) # [1, 3, H, W] in [0, 1]
-
-                    
-                # get coordinate in texture image
-                pose = torch.from_numpy(pose.astype(np.float32)).to(self.device)
-                proj = torch.from_numpy(self.cam.perspective.astype(np.float32)).to(self.device)
-
-                v_cam = torch.matmul(F.pad(mesh.v, pad=(0, 1), mode='constant', value=1.0), torch.inverse(pose).T).float().unsqueeze(0)
-                v_clip = v_cam @ proj.T
-                rast, rast_db = dr.rasterize(glctx, v_clip, mesh.f, (render_resolution, render_resolution))
-
-                depth, _ = dr.interpolate(-v_cam[..., [2]], rast, mesh.f) # [1, H, W, 1]
-                depth = depth.squeeze(0) # [H, W, 1]
-
-                alpha = (rast[0, ..., 3:] > 0).float()
-
-                uvs, _ = dr.interpolate(mesh.vt.unsqueeze(0), rast, mesh.ft)  # [1, 512, 512, 2] in [0, 1]
-
-                # use normal to produce a back-project mask
-                normal, _ = dr.interpolate(mesh.vn.unsqueeze(0).contiguous(), rast, mesh.fn)
-                normal = safe_normalize(normal[0])
-
-                # rotated normal (where [0, 0, 1] always faces camera)
-                rot_normal = normal @ pose[:3, :3]
-                viewcos = rot_normal[..., [2]]
-
-                mask = (alpha > 0) & (viewcos > 0.5)  # [H, W, 1]
-                mask = mask.view(-1)
-
-                uvs = uvs.view(-1, 2).clamp(0, 1)[mask]
-                rgbs = rgbs.view(3, -1).permute(1, 0)[mask].contiguous()
-                
-                # update texture image
-                cur_albedo, cur_cnt = mipmap_linear_grid_put_2d(
-                    h, w,
-                    uvs[..., [1, 0]] * 2 - 1,
-                    rgbs,
-                    min_resolution=256,
-                    return_count=True,
-                )
-                
-                # albedo += cur_albedo
-                # cnt += cur_cnt
-                mask = cnt.squeeze(-1) < 0.1
-                albedo[mask] += cur_albedo[mask]
-                cnt[mask] += cur_cnt[mask]
-
-            mask = cnt.squeeze(-1) > 0
-            albedo[mask] = albedo[mask] / cnt[mask].repeat(1, 3)
-
-            mask = mask.view(h, w)
-
-            albedo = albedo.detach().cpu().numpy()
-            mask = mask.detach().cpu().numpy()
-
-            # dilate texture
-            from sklearn.neighbors import NearestNeighbors
-            from scipy.ndimage import binary_dilation, binary_erosion
-
-            inpaint_region = binary_dilation(mask, iterations=32)
-            inpaint_region[mask] = 0
-
-            search_region = mask.copy()
-            not_search_region = binary_erosion(search_region, iterations=3)
-            search_region[not_search_region] = 0
-
-            search_coords = np.stack(np.nonzero(search_region), axis=-1)
-            inpaint_coords = np.stack(np.nonzero(inpaint_region), axis=-1)
-
-            knn = NearestNeighbors(n_neighbors=1, algorithm="kd_tree").fit(
-                search_coords
-            )
-            _, indices = knn.kneighbors(inpaint_coords)
-
-            albedo[tuple(inpaint_coords.T)] = albedo[tuple(search_coords[indices[:, 0]].T)]
-
-            mesh.albedo = torch.from_numpy(albedo).to(self.device)
-            mesh.write(path)
-
-        else:
-            path = os.path.join(self.opt.outdir, self.opt.save_path + '_model.ply')
-            self.renderer.gaussians.save_ply(path)
-
-        print(f"[INFO] save model to {path}.")
-        
-        
-    def save_mesh(self):
-        path = os.path.join(self.opt.outdir, self.opt.save_path + '_model.ply')
-        opt_ = config_defaults['big']
-        opt_.test_path=path
-        opt_.force_cuda_rast = self.opt.force_cuda_rast
-        converter = Converter(opt_).to(self.device)
-        converter.fit_nerf()
-        converter.fit_mesh()
-        converter.fit_mesh_uv(padding=16)
-        converter.export_mesh(path.replace('.ply', '.obj'))
-
-    # no gui mode
-    def train(self, iters=31):
-        if iters > 0:
-            self.prepare_train()
-            for i in tqdm.trange(iters):
-                self.train_step()
-            # do a last prune
-            self.renderer.gaussians.prune(min_opacity=0.01, extent=1, max_screen_size=1)
-        filter_out(self.renderer)
-        
-        # save
-        #if not (opt.profiling.enabled and opt.profiling.get("skip_postprocessing", False)):
-        print("[DEBUG] calling save_model which should call gaussian_3D_coeff, which has been put onto CUDA")
-        #self.save_model(mode='model')
-        self.save_model(mode='geo+tex')
-        #self.save_mesh()
-        
 import os
-import torch
-import math
 
-USE_CUDA_KERNEL = os.getenv("USE_CUDA_KERNEL", "0") == "1"
+# two separate env-vars
+USE_CUDA_GAUSS   = os.getenv("USE_CUDA_GAUSS",   "0") == "1"
+USE_CUDA_EXTRACT = os.getenv("USE_CUDA_EXTRACT", "0") == "1"
 
-if USE_CUDA_KERNEL:
-    import cuda_kernels
+# --- gaussian_3d_coeff setup ---
+if USE_CUDA_GAUSS:
+    from cuda_wrapper import gaussian_3d_coeff_gpu as gaussian_3d_coeff
+else:
+    def gaussian_3d_coeff(xyzs, covs):
+        xyzs = xyzs.to("cuda")  # profiler output shows that these run on the CPU without these to calls
+        covs = covs.to("cuda")
+        #print(xyzs.device, covs.device)
 
-    def compare_gaussian_cpu_to_gpu():
-        N = 100000
-        torch.manual_seed(42)  # Ensures reproducibility
+        # xyzs: [N, 3]
+        # covs: [N, 6]
+        x, y, z = xyzs[:, 0], xyzs[:, 1], xyzs[:, 2]
+        a, b, c, d, e, f = covs[:, 0], covs[:, 1], covs[:, 2], covs[:, 3], covs[:, 4], covs[:, 5]
 
-        # Generate identical input data for both CPU and GPU
-        xyzs = torch.randn(N, 3, dtype=torch.float32)
-        covs = torch.randn(N, 6, dtype=torch.float32)
+        # eps must be small enough !!!
+        inv_det = 1 / (a * d * f + 2 * e * c * b - e**2 * a - c**2 * d - b**2 * f + 1e-24)
+        inv_a = (d * f - e**2) * inv_det
+        inv_b = (e * c - b * f) * inv_det
+        inv_c = (e * b - c * d) * inv_det
+        inv_d = (a * f - c**2) * inv_det
+        inv_e = (b * c - e * a) * inv_det
+        inv_f = (a * d - b**2) * inv_det
 
-        # CPU (reference) version: uses the pure-PyTorch fallback
-        ref_result = gaussian_3d_coeff(xyzs, covs).cpu()
+        power = -0.5 * (x**2 * inv_a + y**2 * inv_d + z**2 * inv_f) - x * y * inv_b - x * z * inv_c - y * z * inv_e
 
-        # GPU (CUDA kernel) version
-        xyzs_cuda = xyzs.to('cuda').contiguous()
-        covs_cuda = covs.to('cuda').contiguous()
-        out = torch.empty(N, device='cuda', dtype=torch.float32)
-        cuda_kernels.gaussian_3d_launcher(xyzs_cuda, covs_cuda, out)
-        out_cpu = out.cpu()
-
-        # Check for closeness
-        if torch.allclose(ref_result, out_cpu, rtol=1e-4, atol=1e-6):
-            print("CUDA output matches reference implementation.")
-        else:
-            max_diff = torch.max(torch.abs(ref_result - out_cpu))
-            print("Mismatch detected. Max difference:", max_diff.item())
-
-        # Print sample values from both for visual inspection
-        print("\nFirst 10 values from CPU version:")
-        print(ref_result[:10].numpy())
-
-        print("\nFirst 10 values from CUDA version:")
-        print(out_cpu[:10].numpy())
-
-    def compare_extract_fields_cpu_to_gpu():
-        # Use a small resolution so the pure-PyTorch version is reasonably fast
-        resolution = 16
-        num_blocks = 4   # then split_size = resolution // num_blocks = 4
-        relax_ratio = 1.5
-
-        # Number of Gaussians
-        N0 = 50
-        torch.manual_seed(123)
-
-        # Random Gaussian centers in [-1,1]
-        means = (torch.rand(N0, 3, dtype=torch.float32) * 2.0) - 1.0
-
-        # Build diagonal covariance -> invert to get inv_cov6
-        variances = torch.rand(N0, 3, dtype=torch.float32) * 0.1 + 0.05
-        inv_a = 1.0 / variances[:, 0]
-        inv_b = torch.zeros(N0, dtype=torch.float32)
-        inv_c = torch.zeros(N0, dtype=torch.float32)
-        inv_d = 1.0 / variances[:, 1]
-        inv_e = torch.zeros(N0, dtype=torch.float32)
-        inv_f = 1.0 / variances[:, 2]
-        inv_cov6 = torch.stack([inv_a, inv_b, inv_c, inv_d, inv_e, inv_f], dim=1)
-
-        # Random opacities in [0,1]
-        opacities = torch.rand(N0, dtype=torch.float32)
-
-        # --------------------------------------------
-        # CPU reference with EXACT same culling logic
-        # --------------------------------------------
-        block_size = 2.0 / num_blocks            # each sub-cube width in world coords
-        span = relax_ratio * block_size          # culling threshold
-
-        # Build a grid of voxel centers in [-1,1]
-        #coords = torch.linspace(-1.0, 1.0, resolution)
-        coords = -1.0 + (2 * torch.arange(resolution, dtype=torch.float32) + 1)/resolution
-        xs, ys, zs = torch.meshgrid(coords, coords, coords, indexing='ij')
-        pts = torch.stack([xs.reshape(-1), ys.reshape(-1), zs.reshape(-1)], dim=1)  # [M,3]
-        M = pts.shape[0]  # M = resolution^3
-
-        occ_flat_cpu = torch.zeros(M, dtype=torch.float32)
-
-        # Loop over voxels in pure Python/PyTorch, but with vectorized inner loop over Gaussians
-        # We will do "for each voxel index m, for each i in [0..N0-1], check cull, then accumulate"
-        for m in range(M):
-            fx = pts[m, 0].item()
-            fy = pts[m, 1].item()
-            fz = pts[m, 2].item()
-
-            total = 0.0
-            for i in range(N0):
-                mx = means[i, 0].item()
-                my = means[i, 1].item()
-                mz = means[i, 2].item()
-
-                # Same culling as GPU kernel
-                if abs(fx - mx) > span or abs(fy - my) > span or abs(fz - mz) > span:
-                    continue
-
-                dx = fx - mx
-                dy = fy - my
-                dz = fz - mz
-
-                inv_a_cpu = inv_cov6[i, 0].item()
-                inv_b_cpu = inv_cov6[i, 1].item()
-                inv_c_cpu = inv_cov6[i, 2].item()
-                inv_d_cpu = inv_cov6[i, 3].item()
-                inv_e_cpu = inv_cov6[i, 4].item()
-                inv_f_cpu = inv_cov6[i, 5].item()
-
-                # Mahalanobis squared
-                t0 = dx * inv_a_cpu + dy * inv_b_cpu + dz * inv_c_cpu
-                t1 = dx * inv_b_cpu + dy * inv_d_cpu + dz * inv_e_cpu
-                t2 = dx * inv_c_cpu + dy * inv_e_cpu + dz * inv_f_cpu
-                sq = dx * t0 + dy * t1 + dz * t2
-
-                power = -0.5 * sq
-                if power > 0.0:
-                    continue
-                w = math.exp(power)
-
-                total += w * float(opacities[i].item())
-
-            occ_flat_cpu[m] = total
-
-        occ_cpu = occ_flat_cpu.view(resolution, resolution, resolution)
-
-        # --------------------------------------------
-        # GPU version
-        # --------------------------------------------
-        means_cuda     = means.to('cuda')
-        inv_cov6_cuda  = inv_cov6.to('cuda')
-        opacities_cuda = opacities.to('cuda')
-
-        occ_gpu = cuda_kernels.extract_fields_launcher(
-            means_cuda.contiguous(),
-            inv_cov6_cuda.contiguous(),
-            opacities_cuda.contiguous(),
-            resolution,
-            num_blocks,
-            float(relax_ratio)
-        )
-        occ_gpu_cpu = occ_gpu.cpu()
-
-        # Compare
-        if torch.allclose(occ_cpu, occ_gpu_cpu, rtol=1e-4, atol=1e-6):
-            print("extract_fields GPU output matches CPU reference.")
-        else:
-            diff = torch.abs(occ_cpu - occ_gpu_cpu)
-            max_diff = diff.max()
-            print("Mismatch detected in extract_fields. Max difference:", max_diff.item())
-
-        # Print a sample slice for visual inspection
-        z_slice = resolution // 2
-        print(f"\nCPU occ slice at z={z_slice}:")
-        print(occ_cpu[:, :, z_slice])
-        print(f"\nGPU occ slice at z={z_slice}:")
-        print(occ_gpu_cpu[:, :, z_slice])
-
-
-if __name__ == "__main__":
-    import argparse
-    import sys
-    from omegaconf import OmegaConf
-    import io
-
-    # Fix Unicode output in Windows console
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
-
-    #compare_extract_fields_cpu_to_gpu()
-    #sys.exit()
+        power[power > 0] = -1e10 # abnormal values... make weights 0
     
-    print("[DEBUG] USE_CUDA_GAUSS:", os.environ.get("USE_CUDA_GAUSS"))
-    print("[DEBUG] USE_CUDA_EXTRACT:", os.environ.get("USE_CUDA_EXTRACT"))
-    print("[DEBUG] RUN_LABEL:", os.environ.get("RUN_LABEL"))
+        exp = torch.exp(power)
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", required=True, help="path to the yaml config file")
-    parser.add_argument("--summary_path", type=str, default=None, help="optional path to summary timing log")
-    args, extras = parser.parse_known_args()
+        return exp
 
-    # override default config from cli
-    opt = OmegaConf.merge(OmegaConf.load(args.config), OmegaConf.from_cli(extras))
-    
-    nvtx.range_push("OUTER_RANGE")
-    
-    gui = GUI(opt)
-    gui.seed_everything()
+def build_rotation(r):
+    norm = torch.sqrt(r[:,0]*r[:,0] + r[:,1]*r[:,1] + r[:,2]*r[:,2] + r[:,3]*r[:,3])
 
-    if opt.gui:
-        gui.render()
-    else:
-        #print("calling nvtx_push_broad for TRAIN_TOP_LEVEL - gui.train (only calling NVTX on scope broad tho")
+    q = r / norm[:, None]
 
-        gui.train(opt.total_steps)
+    R = torch.zeros((q.size(0), 3, 3), device='cuda')
 
-    torch.cuda.synchronize()
-    
-    nvtx.range_pop("OUTER_RANGE")
+    r = q[:, 0]
+    x = q[:, 1]
+    y = q[:, 2]
+    z = q[:, 3]
+
+    R[:, 0, 0] = 1 - 2 * (y*y + z*z)
+    R[:, 0, 1] = 2 * (x*y - r*z)
+    R[:, 0, 2] = 2 * (x*z + r*y)
+    R[:, 1, 0] = 2 * (x*y + r*z)
+    R[:, 1, 1] = 1 - 2 * (x*x + z*z)
+    R[:, 1, 2] = 2 * (y*z - r*x)
+    R[:, 2, 0] = 2 * (x*z - r*y)
+    R[:, 2, 1] = 2 * (y*z + r*x)
+    R[:, 2, 2] = 1 - 2 * (x*x + y*y)
+    return R
+
+def build_scaling_rotation(s, r):
+    L = torch.zeros((s.shape[0], 3, 3), dtype=torch.float, device="cuda")
+    R = build_rotation(r)
+
+    L[:,0,0] = s[:,0]
+    L[:,1,1] = s[:,1]
+    L[:,2,2] = s[:,2]
+
+    L = R @ L
+    return L
+
+class BasicPointCloud(NamedTuple):
+    points: np.array
+    colors: np.array
+    normals: np.array
+
+# --- extract_fields setup ---
+from cuda_wrapper import extract_fields_gpu
+
+class GaussianModel:
+
+    def setup_functions(self):
+        def build_covariance_from_scaling_rotation(scaling, scaling_modifier, rotation):
+            L = build_scaling_rotation(scaling_modifier * scaling, rotation)
+            actual_covariance = L @ L.transpose(1, 2)
+            symm = strip_symmetric(actual_covariance)
+            return symm
         
-    # gui.save_video(f'./{opt.save_path}-video.mp4')
+        self.scaling_activation = torch.exp
+        self.scaling_inverse_activation = torch.log
 
-    #lets just focus on training for now by using the skip_postprocessing=true command line argument
-    if not (opt.profiling.enabled and opt.profiling.get("skip_postprocessing", False)):
-        #nvtx.range_push("save_image")
-        print("calling gui.save_image")
-        gui.save_image(f'./test_dirs/work_dirs/{opt.save_path}',num=8)
-        #nvtx.range_pop()
+        self.covariance_activation = build_covariance_from_scaling_rotation
 
-        #gui.save_video(f'./test_dirs/work_dirs/{opt.save_path}/video.mp4')
+        self.opacity_activation = torch.sigmoid
+        self.inverse_opacity_activation = inverse_sigmoid
+
+        self.rotation_activation = torch.nn.functional.normalize
+
+
+    def __init__(self, sh_degree : int):
+        self.active_sh_degree = 0
+        self.max_sh_degree = sh_degree  
+        self._xyz = torch.empty(0)
+        self._features_dc = torch.empty(0)
+        self._features_rest = torch.empty(0)
+        self._scaling = torch.empty(0)
+        self._rotation = torch.empty(0)
+        self._opacity = torch.empty(0)
+        self.max_radii2D = torch.empty(0)
+        self.xyz_gradient_accum = torch.empty(0)
+        self.denom = torch.empty(0)
+        self.optimizer = None
+        self.percent_dense = 0
+        self.spatial_lr_scale = 0
+        self.setup_functions()
+
+    def capture(self):
+        return (
+            self.active_sh_degree,
+            self._xyz,
+            self._features_dc,
+            self._features_rest,
+            self._scaling,
+            self._rotation,
+            self._opacity,
+            self.max_radii2D,
+            self.xyz_gradient_accum,
+            self.denom,
+            self.optimizer.state_dict(),
+            self.spatial_lr_scale,
+        )
     
-    t1 = time.perf_counter()
-    print(f"END TIMER: Total elapsed time: {t1 - t0:.3f} seconds", flush=True)
+    def restore(self, model_args, training_args):
+        (self.active_sh_degree, 
+        self._xyz, 
+        self._features_dc, 
+        self._features_rest,
+        self._scaling, 
+        self._rotation, 
+        self._opacity,
+        self.max_radii2D, 
+        xyz_gradient_accum, 
+        denom,
+        opt_dict, 
+        self.spatial_lr_scale) = model_args
+        self.training_setup(training_args)
+        self.xyz_gradient_accum = xyz_gradient_accum
+        self.denom = denom
+        self.optimizer.load_state_dict(opt_dict)
+
+    @property
+    def get_scaling(self):
+        return self.scaling_activation(self._scaling)
     
-    # Save timing to summary log if RUN_LABEL is set
-    label = os.environ.get("RUN_LABEL", "unnamed_run")
-    if args.summary_path:
-        os.makedirs(os.path.dirname(args.summary_path), exist_ok=True)
-        with open(args.summary_path, "a", encoding="utf-8") as f:
-            f.write(f"{label}: {t1 - t0:.3f} seconds\n")
+    @property
+    def get_rotation(self):
+        return self.rotation_activation(self._rotation)
+    
+    @property
+    def get_xyz(self):
+        return self._xyz
+    
+    @property
+    def get_features(self):
+        features_dc = self._features_dc
+        features_rest = self._features_rest
+        return torch.cat((features_dc, features_rest), dim=1)
+    
+    @property
+    def get_opacity(self):
+        return self.opacity_activation(self._opacity)
+
+    @torch.no_grad()
+    def extract_fields(self, resolution=128, num_blocks=16, relax_ratio=1.5):
+        print("ENTER extract_fields")
+        """
+        If USE_CUDA_KERNEL is True, this calls the fused CUDA kernel.
+        Otherwise, it falls back to the original Python triple-loop.
+        """
+        block_size = 2.0 / num_blocks
+        assert resolution % block_size == 0
+        split_size = resolution // num_blocks
+
+        opacities = self.get_opacity  # [N, 1]
+        mask = (opacities > 0.005).squeeze(1)
+        opacities = opacities[mask]                # [N0, 1]
+        xyzs = self.get_xyz[mask]                  # [N0, 3]
+        stds = self.get_scaling[mask]              # [N0, 3]
+
+        # Normalize to [-1, 1]
+        mn = xyzs.amin(0)
+        mx = xyzs.amax(0)
+        self.center = (mn + mx) / 2
+        self.scale = 1.8 / (mx - mn).amax().item()
+        xyzs = (xyzs - self.center) * self.scale   # [N0, 3]
+        stds = stds * self.scale                   # [N0, 3]
+
+        # Build covs = lower-triangular packed symmetric covariance [N0, 6]
+        covs = self.covariance_activation(stds, 1.0, self._rotation[mask])
+
+        if USE_CUDA_EXTRACT:
+            print(">>> PUSH EXTRACT_FIELDS_GPU")
+            nvtx.range_push("EXTRACT_FIELDS_GPU")
+            # Convert (a, b, c, d, e, f) covariance to (inv_a, inv_b, inv_c, inv_d, inv_e, inv_f)
+            # using the same formula as in gaussian_3d_coeff_gpu
+            a = covs[:, 0]
+            b = covs[:, 1]
+            c = covs[:, 2]
+            d = covs[:, 3]
+            e = covs[:, 4]
+            f = covs[:, 5]
+
+            det = a * d * f + 2.0 * e * c * b - e * e * a - c * c * d - b * b * f + 1e-24
+            inv_det = 1.0 / det
+
+            inv_a = (d * f - e * e) * inv_det
+            inv_b = (e * c - b * f) * inv_det
+            inv_c = (e * b - c * d) * inv_det
+            inv_d = (a * f - c * c) * inv_det
+            inv_e = (b * c - e * a) * inv_det
+            inv_f = (a * d - b * b) * inv_det
+
+            inv_cov6 = torch.stack([inv_a, inv_b, inv_c, inv_d, inv_e, inv_f], dim=1)  # [N0, 6]
+            # Remove the extra dimension from opacities: [N0]
+            opas = opacities.squeeze(1)
+
+            # Call fused CUDA kernel; returns [resolution, resolution, resolution]
+ 
+            occ = extract_fields_gpu(
+                xyzs,
+                inv_cov6,
+                opas,
+                resolution,
+                num_blocks,
+                relax_ratio
+            )
+            torch.cuda.synchronize() 
+            nvtx.range_pop() #("EXTRACT_FIELDS_GPU")
+            print(">>> POP  EXTRACT_FIELDS_GPU")
+            
+            # Disable logging
+            # kiui.lo(occ, verbose=1)
+            return occ
+        else:
+            print("ENTER USE_CUDA_KERNEL ELSE block in extract_fields")
+            
+            nvtx.range_push("EXTRACT_FIELDS_CPU")
+            # ---------------------------------------------------------------------
+            # FALLBACK: pure-Python version (original triple-loop)
+            # ---------------------------------------------------------------------
+            device = opacities.device
+            occ = torch.zeros([resolution, resolution, resolution], dtype=torch.float32, device=device)
+
+            X = torch.linspace(-1.0, 1.0, resolution).split(split_size)
+            Y = torch.linspace(-1.0, 1.0, resolution).split(split_size)
+            Z = torch.linspace(-1.0, 1.0, resolution).split(split_size)
+
+            for xi, xs in enumerate(X):
+                for yi, ys in enumerate(Y):
+                    for zi, zs in enumerate(Z):
+                        xx, yy, zz = torch.meshgrid(xs, ys, zs, indexing="ij")
+                        pts = torch.stack(
+                            [xx.reshape(-1), yy.reshape(-1), zz.reshape(-1)],
+                            dim=1
+                        ).to(device)  # [M, 3]
+                        vmin = pts.amin(0) - block_size * relax_ratio
+                        vmax = pts.amax(0) + block_size * relax_ratio
+                        mask_block = (xyzs < vmax).all(-1) & (xyzs > vmin).all(-1)
+                        if not mask_block.any():
+                            continue
+
+                        mask_xyzs = xyzs[mask_block]   # [L, 3]
+                        mask_covs = covs[mask_block]   # [L, 6]
+                        mask_opas = opacities[mask_block].view(1, -1)  # [1, L]
+
+                        g_pts = pts.unsqueeze(1).repeat(1, mask_covs.shape[0], 1) - mask_xyzs.unsqueeze(0)  # [M, L, 3]
+                        g_covs = mask_covs.unsqueeze(0).repeat(pts.shape[0], 1, 1)                          # [M, L, 6]
+
+                        batch_g = 1024
+                        val = 0.0
+                        for start in range(0, g_covs.shape[1], batch_g):
+                            end = min(start + batch_g, g_covs.shape[1])
+
+                            if USE_CUDA_GAUSS:
+                              nvtx.range_push("GAUSSIAN_3D_COEFF_GPU")
+                            else:
+                              nvtx.range_push("GAUSSIAN_3D_COEFF_CPU")
+                              
+                            w = gaussian_3d_coeff(
+                                g_pts[:, start:end].reshape(-1, 3),
+                                g_covs[:, start:end].reshape(-1, 6)
+                            ).reshape(pts.shape[0], -1)  # [M, l]
+                            
+                            if USE_CUDA_GAUSS:
+                              torch.cuda.synchronize()
+                            
+                            nvtx.range_pop() #("GAUSSIAN_3D_COEFF")
+
+                            val += (mask_opas[:, start:end] * w).sum(-1)
+
+                        occ[
+                            xi * split_size: xi * split_size + len(xs),
+                            yi * split_size: yi * split_size + len(ys),
+                            zi * split_size: zi * split_size + len(zs)
+                        ] = val.reshape(len(xs), len(ys), len(zs))
+
+            # Disable logging
+            # kiui.lo(occ, verbose=1)
+            
+            nvtx.range_pop() #("EXTRACT_FIELDS_CPU")
+            
+            print("RETURN FROM USE_CUDA_KERNEL ELSE block in extract_fields")
+            return occ
+
+    def extract_mesh(self, path, density_thresh=1, resolution=128, decimate_target=1e5):
+        #print("ENTER extract_mesh")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+
+        print("calling extract_fields from within extract_mesh")
+        # profiling extract_fields
+        occ = self.extract_fields(resolution).detach().cpu().numpy()
+
+        import mcubes
+        vertices, triangles = mcubes.marching_cubes(occ, density_thresh)
+        vertices = vertices / (resolution - 1.0) * 2 - 1
+
+        # transform back to the original space
+        vertices = vertices / self.scale + self.center.detach().cpu().numpy()
+
+        vertices, triangles = clean_mesh(vertices, triangles, remesh=True, remesh_size=0.015)
+        if decimate_target > 0 and triangles.shape[0] > decimate_target:
+            vertices, triangles = decimate_mesh(vertices, triangles, decimate_target)
+
+        v = torch.from_numpy(vertices.astype(np.float32)).contiguous().cuda()
+        f = torch.from_numpy(triangles.astype(np.int32)).contiguous().cuda()
+
+        print(
+            f"[INFO] marching cubes result: {v.shape} ({v.min().item()}-{v.max().item()}), {f.shape}"
+        )
+
+        mesh = Mesh(v=v, f=f, device='cuda')
+
+        #print("RETURN extract_mesh")
+        return mesh
+    
+    def get_covariance(self, scaling_modifier = 1):
+        return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
+
+    def oneupSHdegree(self):
+        if self.active_sh_degree < self.max_sh_degree:
+            self.active_sh_degree += 1
+
+    def create_from_pcd(self, pcd : BasicPointCloud, spatial_lr_scale : float = 1):
+        self.spatial_lr_scale = spatial_lr_scale
+        fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
+        fused_color = RGB2SH(torch.tensor(np.asarray(pcd.colors)).float().cuda())
+        features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
+        features[:, :3, 0 ] = fused_color
+        features[:, 3:, 1:] = 0.0
+
+        print("Number of points at initialisation : ", fused_point_cloud.shape[0])
+
+        dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()), 0.0000001)
+        scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 3)
+        rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
+        rots[:, 0] = 1
+
+        opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
+
+        self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
+        self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
+        self._features_rest = nn.Parameter(features[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
+        self._scaling = nn.Parameter(scales.requires_grad_(True))
+        self._rotation = nn.Parameter(rots.requires_grad_(True))
+        self._opacity = nn.Parameter(opacities.requires_grad_(True))
+        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+
+    def training_setup(self, training_args):
+        self.percent_dense = training_args.percent_dense
+        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+
+        l = [
+            {'params': [self._xyz], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "xyz"},
+            {'params': [self._features_dc], 'lr': training_args.feature_lr, "name": "f_dc"},
+            {'params': [self._features_rest], 'lr': training_args.feature_lr / 20.0, "name": "f_rest"},
+            {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
+            {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
+            {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
+        ]
+
+        self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
+        self.xyz_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init*self.spatial_lr_scale,
+                                                    lr_final=training_args.position_lr_final*self.spatial_lr_scale,
+                                                    lr_delay_mult=training_args.position_lr_delay_mult,
+                                                    max_steps=training_args.position_lr_max_steps)
+
+    def update_learning_rate(self, iteration):
+        ''' Learning rate scheduling per step '''
+        for param_group in self.optimizer.param_groups:
+            if param_group["name"] == "xyz":
+                lr = self.xyz_scheduler_args(iteration)
+                param_group['lr'] = lr
+                return lr
+
+    def construct_list_of_attributes(self):
+        l = ['x', 'y', 'z', 'nx', 'ny', 'nz']
+        # All channels except the 3 DC
+        for i in range(self._features_dc.shape[1]*self._features_dc.shape[2]):
+            l.append('f_dc_{}'.format(i))
+        for i in range(self._features_rest.shape[1]*self._features_rest.shape[2]):
+            l.append('f_rest_{}'.format(i))
+        l.append('opacity')
+        for i in range(self._scaling.shape[1]):
+            l.append('scale_{}'.format(i))
+        for i in range(self._rotation.shape[1]):
+            l.append('rot_{}'.format(i))
+        return l
+
+    def save_ply(self, path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+
+        xyz = self._xyz.detach().cpu().numpy()
+        normals = np.zeros_like(xyz)
+        f_dc = self._features_dc.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        f_rest = self._features_rest.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        opacities = self._opacity.detach().cpu().numpy()
+        scale = self._scaling.detach().cpu().numpy()
+        rotation = self._rotation.detach().cpu().numpy()
+
+        dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
+
+        elements = np.empty(xyz.shape[0], dtype=dtype_full)
+        attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
+        elements[:] = list(map(tuple, attributes))
+        el = PlyElement.describe(elements, 'vertex')
+        PlyData([el]).write(path)
+
+    def reset_opacity(self):
+        opacities_new = inverse_sigmoid(torch.min(self.get_opacity, torch.ones_like(self.get_opacity)*0.01))
+        optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
+        self._opacity = optimizable_tensors["opacity"]
+
+    def load_ply(self, path):
+        plydata = PlyData.read(path)
+
+        xyz = np.stack((np.asarray(plydata.elements[0]["x"]),
+                        np.asarray(plydata.elements[0]["y"]),
+                        np.asarray(plydata.elements[0]["z"])),  axis=1)
+        opacities = np.asarray(plydata.elements[0]["opacity"])[..., np.newaxis]
+
+        print("Number of points at loading : ", xyz.shape[0])
+
+        features_dc = np.zeros((xyz.shape[0], 3, 1))
+        features_dc[:, 0, 0] = np.asarray(plydata.elements[0]["f_dc_0"])
+        features_dc[:, 1, 0] = np.asarray(plydata.elements[0]["f_dc_1"])
+        features_dc[:, 2, 0] = np.asarray(plydata.elements[0]["f_dc_2"])
+
+        extra_f_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("f_rest_")]
+        assert len(extra_f_names)==3*(self.max_sh_degree + 1) ** 2 - 3
+        features_extra = np.zeros((xyz.shape[0], len(extra_f_names)))
+        for idx, attr_name in enumerate(extra_f_names):
+            features_extra[:, idx] = np.asarray(plydata.elements[0][attr_name])
+        # Reshape (P,F*SH_coeffs) to (P, F, SH_coeffs except DC)
+        features_extra = features_extra.reshape((features_extra.shape[0], 3, (self.max_sh_degree + 1) ** 2 - 1))
+
+        scale_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("scale_")]
+        scales = np.zeros((xyz.shape[0], len(scale_names)))
+        for idx, attr_name in enumerate(scale_names):
+            scales[:, idx] = np.asarray(plydata.elements[0][attr_name])
+
+        rot_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("rot")]
+        rots = np.zeros((xyz.shape[0], len(rot_names)))
+        for idx, attr_name in enumerate(rot_names):
+            rots[:, idx] = np.asarray(plydata.elements[0][attr_name])
+
+        self._xyz = nn.Parameter(torch.tensor(xyz, dtype=torch.float, device="cuda").requires_grad_(True))
+        self._features_dc = nn.Parameter(torch.tensor(features_dc, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
+        self._features_rest = nn.Parameter(torch.tensor(features_extra, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
+        self._opacity = nn.Parameter(torch.tensor(opacities, dtype=torch.float, device="cuda").requires_grad_(True))
+        self._scaling = nn.Parameter(torch.tensor(scales, dtype=torch.float, device="cuda").requires_grad_(True))
+        self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
+
+        self.active_sh_degree = self.max_sh_degree
+
+    def replace_tensor_to_optimizer(self, tensor, name):
+        optimizable_tensors = {}
+        for group in self.optimizer.param_groups:
+            if group["name"] == name:
+                stored_state = self.optimizer.state.get(group['params'][0], None)
+                stored_state["exp_avg"] = torch.zeros_like(tensor)
+                stored_state["exp_avg_sq"] = torch.zeros_like(tensor)
+
+                del self.optimizer.state[group['params'][0]]
+                group["params"][0] = nn.Parameter(tensor.requires_grad_(True))
+                self.optimizer.state[group['params'][0]] = stored_state
+
+                optimizable_tensors[group["name"]] = group["params"][0]
+        return optimizable_tensors
+
+    def _prune_optimizer(self, mask):
+        optimizable_tensors = {}
+        for group in self.optimizer.param_groups:
+            stored_state = self.optimizer.state.get(group['params'][0], None)
+            if stored_state is not None:
+                stored_state["exp_avg"] = stored_state["exp_avg"][mask]
+                stored_state["exp_avg_sq"] = stored_state["exp_avg_sq"][mask]
+
+                del self.optimizer.state[group['params'][0]]
+                group["params"][0] = nn.Parameter((group["params"][0][mask].requires_grad_(True)))
+                self.optimizer.state[group['params'][0]] = stored_state
+
+                optimizable_tensors[group["name"]] = group["params"][0]
+            else:
+                group["params"][0] = nn.Parameter(group["params"][0][mask].requires_grad_(True))
+                optimizable_tensors[group["name"]] = group["params"][0]
+        return optimizable_tensors
+
+    def prune_points(self, mask):
+        valid_points_mask = ~mask
+        optimizable_tensors = self._prune_optimizer(valid_points_mask)
+
+        self._xyz = optimizable_tensors["xyz"]
+        self._features_dc = optimizable_tensors["f_dc"]
+        self._features_rest = optimizable_tensors["f_rest"]
+        self._opacity = optimizable_tensors["opacity"]
+        self._scaling = optimizable_tensors["scaling"]
+        self._rotation = optimizable_tensors["rotation"]
+
+        self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
+
+        self.denom = self.denom[valid_points_mask]
+        self.max_radii2D = self.max_radii2D[valid_points_mask]
+
+
+    def prune_points_test(self, mask):
+        mask = ~mask
+        self._xyz = self._xyz[mask].detach()
+        self._features_dc = self._features_dc[mask].detach()
+        self._features_rest = self._features_rest[mask].detach()
+        self._opacity = self._opacity[mask].detach()
+        self._scaling = self._scaling[mask].detach()
+        self._rotation = self._rotation[mask].detach()
+
+        self.xyz_gradient_accum = self.xyz_gradient_accum[mask].detach()
+        self.denom = self.denom[mask].detach()
+        self.max_radii2D = self.max_radii2D[mask].detach()
+
+    def cat_tensors_to_optimizer(self, tensors_dict):
+        optimizable_tensors = {}
+        for group in self.optimizer.param_groups:
+            assert len(group["params"]) == 1
+            extension_tensor = tensors_dict[group["name"]]
+            stored_state = self.optimizer.state.get(group['params'][0], None)
+            if stored_state is not None:
+
+                stored_state["exp_avg"] = torch.cat((stored_state["exp_avg"], torch.zeros_like(extension_tensor)), dim=0)
+                stored_state["exp_avg_sq"] = torch.cat((stored_state["exp_avg_sq"], torch.zeros_like(extension_tensor)), dim=0)
+
+                del self.optimizer.state[group['params'][0]]
+                group["params"][0] = nn.Parameter(torch.cat((group["params"][0], extension_tensor), dim=0).requires_grad_(True))
+                self.optimizer.state[group['params'][0]] = stored_state
+
+                optimizable_tensors[group["name"]] = group["params"][0]
+            else:
+                group["params"][0] = nn.Parameter(torch.cat((group["params"][0], extension_tensor), dim=0).requires_grad_(True))
+                optimizable_tensors[group["name"]] = group["params"][0]
+
+        return optimizable_tensors
+
+    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation):
+        d = {"xyz": new_xyz,
+        "f_dc": new_features_dc,
+        "f_rest": new_features_rest,
+        "opacity": new_opacities,
+        "scaling" : new_scaling,
+        "rotation" : new_rotation}
+
+        optimizable_tensors = self.cat_tensors_to_optimizer(d)
+        self._xyz = optimizable_tensors["xyz"]
+        self._features_dc = optimizable_tensors["f_dc"]
+        self._features_rest = optimizable_tensors["f_rest"]
+        self._opacity = optimizable_tensors["opacity"]
+        self._scaling = optimizable_tensors["scaling"]
+        self._rotation = optimizable_tensors["rotation"]
+
+        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+
+    def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
+        n_init_points = self.get_xyz.shape[0]
+        # Extract points that satisfy the gradient condition
+        padded_grad = torch.zeros((n_init_points), device="cuda")
+        padded_grad[:grads.shape[0]] = grads.squeeze()
+        selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
+        selected_pts_mask = torch.logical_and(selected_pts_mask,
+            torch.max(self.get_scaling, dim=1).values > self.percent_dense*scene_extent
+        )
+
+        stds = self.get_scaling[selected_pts_mask].repeat(N,1)
+        means =torch.zeros((stds.size(0), 3),device="cuda")
+        samples = torch.normal(mean=means, std=stds)
+        rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N,1,1)
+        new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask].repeat(N, 1)
+        new_scaling = self.scaling_inverse_activation(self.get_scaling[selected_pts_mask].repeat(N,1) / (0.8*N))
+        new_rotation = self._rotation[selected_pts_mask].repeat(N,1)
+        new_features_dc = self._features_dc[selected_pts_mask].repeat(N,1,1)
+        new_features_rest = self._features_rest[selected_pts_mask].repeat(N,1,1)
+        new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
+
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation)
+
+        prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
+        self.prune_points(prune_filter)
+
+    def densify_and_clone(self, grads, grad_threshold, scene_extent):
+        # Extract points that satisfy the gradient condition
+        selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
+        selected_pts_mask = torch.logical_and(selected_pts_mask,
+            torch.max(self.get_scaling, dim=1).values <= self.percent_dense*scene_extent
+        )
+        
+        new_xyz = self._xyz[selected_pts_mask]
+        new_features_dc = self._features_dc[selected_pts_mask]
+        new_features_rest = self._features_rest[selected_pts_mask]
+        new_opacities = self._opacity[selected_pts_mask]
+        new_scaling = self._scaling[selected_pts_mask]
+        new_rotation = self._rotation[selected_pts_mask]
+
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation)
+
+    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
+        grads = self.xyz_gradient_accum / self.denom
+        grads[grads.isnan()] = 0.0
+
+        self.densify_and_clone(grads, max_grad, extent)
+        self.densify_and_split(grads, max_grad, extent)
+
+        prune_mask = (self.get_opacity < min_opacity).squeeze()
+        if max_screen_size:
+            big_points_vs = self.max_radii2D > max_screen_size
+            big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
+            prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
+        self.prune_points(prune_mask)
+
+        torch.cuda.empty_cache()
+
+    def prune(self, min_opacity, extent, max_screen_size):
+
+        prune_mask = (self.get_opacity < min_opacity).squeeze()
+        if max_screen_size:
+            big_points_vs = self.max_radii2D > max_screen_size
+            big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
+            prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
+        self.prune_points(prune_mask)
+
+        torch.cuda.empty_cache()
+
+
+    def add_densification_stats(self, viewspace_point_tensor, update_filter):
+        self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
+        self.denom[update_filter] += 1
+
+def getProjectionMatrix(znear, zfar, fovX, fovY):
+    tanHalfFovY = math.tan((fovY / 2))
+    tanHalfFovX = math.tan((fovX / 2))
+
+    P = torch.zeros(4, 4)
+
+    z_sign = 1.0
+
+    P[0, 0] = 1 / tanHalfFovX
+    P[1, 1] = 1 / tanHalfFovY
+    P[3, 2] = z_sign
+    P[2, 2] = z_sign * zfar / (zfar - znear)
+    P[2, 3] = -(zfar * znear) / (zfar - znear)
+    return P
+
+
+class MiniCam:
+    def __init__(self, c2w, width, height, fovy, fovx, znear, zfar):
+        # c2w (pose) should be in NeRF convention.
+
+        self.image_width = width
+        self.image_height = height
+        self.FoVy = fovy
+        self.FoVx = fovx
+        self.znear = znear
+        self.zfar = zfar
+
+        w2c = np.linalg.inv(c2w)
+
+        # rectify...
+        w2c[1:3, :3] *= -1
+        w2c[:3, 3] *= -1
+
+        self.world_view_transform = torch.tensor(w2c).transpose(0, 1).cuda()
+        self.projection_matrix = (
+            getProjectionMatrix(
+                znear=self.znear, zfar=self.zfar, fovX=self.FoVx, fovY=self.FoVy
+            )
+            .transpose(0, 1)
+            .cuda()
+        )
+        self.full_proj_transform = self.world_view_transform @ self.projection_matrix
+        self.camera_center = -torch.tensor(c2w[:3, 3]).cuda()
+
+
+class Renderer:
+    def __init__(self, sh_degree=3, white_background=True, radius=1):
+        
+        self.sh_degree = sh_degree
+        self.white_background = white_background
+        self.radius = radius
+
+        self.gaussians = GaussianModel(sh_degree)
+
+        self.bg_color = torch.tensor(
+            [1, 1, 1] if white_background else [0, 0, 0],
+            dtype=torch.float32,
+            device="cuda",
+        )
+    
+    def initialize(self, input=None, num_pts=5000, radius=0.5):
+        # load checkpoint
+        if input is None:
+            # init from random point cloud
+            
+            phis = np.random.random((num_pts,)) * 2 * np.pi
+            costheta = np.random.random((num_pts,)) * 2 - 1
+            thetas = np.arccos(costheta)
+            mu = np.random.random((num_pts,))
+            radius = radius * np.cbrt(mu)
+            x = radius * np.sin(thetas) * np.cos(phis)
+            y = radius * np.sin(thetas) * np.sin(phis)
+            z = radius * np.cos(thetas)
+            xyz = np.stack((x, y, z), axis=1)
+            # xyz = np.random.random((num_pts, 3)) * 2.6 - 1.3
+
+            shs = np.random.random((num_pts, 3)) / 255.0
+            pcd = BasicPointCloud(
+                points=xyz, colors=SH2RGB(shs), normals=np.zeros((num_pts, 3))
+            )
+            self.gaussians.create_from_pcd(pcd, 10)
+        elif isinstance(input, BasicPointCloud):
+            # load from a provided pcd
+            self.gaussians.create_from_pcd(input, 1)
+        else:
+            # load from saved ply
+            self.gaussians.load_ply(input)
+
+    def render(
+        self,
+        viewpoint_camera,
+        scaling_modifier=1.0,
+        bg_color=None,
+        override_color=None,
+        compute_cov3D_python=False,
+        convert_SHs_python=False,
+    ):
+        # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
+        screenspace_points = (
+            torch.zeros_like(
+                self.gaussians.get_xyz,
+                dtype=self.gaussians.get_xyz.dtype,
+                requires_grad=True,
+                device="cuda",
+            )
+            + 0
+        )
+        try:
+            screenspace_points.retain_grad()
+        except:
+            pass
+
+        # Set up rasterization configuration
+        tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
+        tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
+
+        raster_settings = GaussianRasterizationSettings(
+            image_height=int(viewpoint_camera.image_height),
+            image_width=int(viewpoint_camera.image_width),
+            tanfovx=tanfovx,
+            tanfovy=tanfovy,
+            bg=self.bg_color if bg_color is None else bg_color,
+            scale_modifier=scaling_modifier,
+            viewmatrix=viewpoint_camera.world_view_transform,
+            projmatrix=viewpoint_camera.full_proj_transform,
+            sh_degree=self.gaussians.active_sh_degree,
+            campos=viewpoint_camera.camera_center,
+            prefiltered=False,
+            debug=False,
+        )
+
+        rasterizer = GaussianRasterizer(raster_settings=raster_settings)
+
+        means3D = self.gaussians.get_xyz
+        means2D = screenspace_points
+        opacity = self.gaussians.get_opacity
+
+        # If precomputed 3d covariance is provided, use it. If not, then it will be computed from
+        # scaling / rotation by the rasterizer.
+        scales = None
+        rotations = None
+        cov3D_precomp = None
+        if compute_cov3D_python:
+            cov3D_precomp = self.gaussians.get_covariance(scaling_modifier)
+        else:
+            scales = self.gaussians.get_scaling
+            rotations = self.gaussians.get_rotation
+
+        # If precomputed colors are provided, use them. Otherwise, if it is desired to precompute colors
+        # from SHs in Python, do it. If not, then SH -> RGB conversion will be done by rasterizer.
+        shs = None
+        colors_precomp = None
+        if colors_precomp is None:
+            if convert_SHs_python:
+                shs_view = self.gaussians.get_features.transpose(1, 2).view(
+                    -1, 3, (self.gaussians.max_sh_degree + 1) ** 2
+                )
+                dir_pp = self.gaussians.get_xyz - viewpoint_camera.camera_center.repeat(
+                    self.gaussians.get_features.shape[0], 1
+                )
+                dir_pp_normalized = dir_pp / dir_pp.norm(dim=1, keepdim=True)
+                sh2rgb = eval_sh(
+                    self.gaussians.active_sh_degree, shs_view, dir_pp_normalized
+                )
+                colors_precomp = torch.clamp_min(sh2rgb + 0.5, 0.0)
+            else:
+                shs = self.gaussians.get_features
+        else:
+            colors_precomp = override_color
+
+        #nvtx.range_push("GAUSSIAN_RASTERIZER")
+        # Rasterize visible Gaussians to image, obtain their radii (on screen).
+        rendered_image, radii, rendered_depth, rendered_alpha = rasterizer(
+            means3D=means3D,
+            means2D=means2D,
+            shs=shs,
+            colors_precomp=colors_precomp,
+            opacities=opacity,
+            scales=scales,
+            rotations=rotations,
+            cov3D_precomp=cov3D_precomp,
+        )
+        #nvtx.range_pop() #("GAUSSIAN_RASTERIZER")
+        rendered_image = rendered_image.clamp(0, 1)
+
+        # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
+        # They will be excluded from value updates used in the splitting criteria.
+        return {
+            "image": rendered_image,
+            "depth": rendered_depth,
+            "alpha": rendered_alpha,
+            "viewspace_points": screenspace_points,
+            "visibility_filter": radii > 0,
+            "radii": radii,
+        }
