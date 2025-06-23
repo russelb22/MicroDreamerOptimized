@@ -1010,7 +1010,7 @@ if __name__ == "__main__":
 
     torch.cuda.synchronize()
     
-    nvtx.range_pop("OUTER_RANGE")
+    nvtx.range_pop() #("OUTER_RANGE")
         
     # gui.save_video(f'./{opt.save_path}-video.mp4')
 
