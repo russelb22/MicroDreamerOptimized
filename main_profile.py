@@ -995,27 +995,22 @@ if __name__ == "__main__":
 
     # override default config from cli
     opt = OmegaConf.merge(OmegaConf.load(args.config), OmegaConf.from_cli(extras))
-
+    
+    nvtx.range_push("OUTER_RANGE")
+    
     gui = GUI(opt)
     gui.seed_everything()
 
-    print("Profiling Mode:", opt.profiling.mode)
-    print("[DEBUG] Profiling config after CLI merge:", opt.profiling)
-    print("[DEBUG] Iters specified:", opt.iters)
-    print("[DEBUG] Total_steps specified:", opt.total_steps)
-
-    print("START TIMER", flush=True)
-    t0 = time.perf_counter()
-
     if opt.gui:
-        nvtx_push_broad(opt, "RENDER_TOP_LEVEL")
         gui.render()
-        nvtx_pop_broad(opt)
     else:
         #print("calling nvtx_push_broad for TRAIN_TOP_LEVEL - gui.train (only calling NVTX on scope broad tho")
-        nvtx_push_broad(opt, "TRAIN_TOP_LEVEL")
+
         gui.train(opt.total_steps)
-        nvtx_pop_broad(opt)
+
+    torch.cuda.synchronize()
+    
+    nvtx.range_pop("OUTER_RANGE")
         
     # gui.save_video(f'./{opt.save_path}-video.mp4')
 
