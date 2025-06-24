@@ -3,37 +3,40 @@ This repository was forked from the original MicroDreamer repository for use in 
 
 Original work by ML-GSAI/MicroDreamer, used here under its Apache license.
 
-## Project Overview and Results - CUDA Optimization Summary
-In this project we used NVIDIA Nsight Systems to profile MicroDreamer and identify pure-Python hotspots worth moving into custom CUDA kernels.
+## Project Overview and Results
+These results are measured with NVTX Ranges and run in Google Colab
 
-**1.	gaussian_3d_coeff()**
+1. **gaussian_3d_coeff()**
+   
+   - Located in `gs_renderer.py`, this per-voxel function was highlighted by Nsight as an arithmetic hotspot with no external dependencies.  
+   - Rewritten as a small CUDA kernel and launched via PyTorch’s C++ extension API.  
+   - **Results:**  
+     - CPU: ~1.3 ms per call  
+     - GPU: ~0.12 ms per call  
+     - **Speedup:** ≈ 11×  
 
-  •	Located in gs_renderer.py, this per-voxel function was highlighted by Nsight as a heavy arithmetic hotspot with no external dependencies.
+3. **extract_fields()**
+   
+   -  Defined in gs_renderer.py, this method computes the occupancy value for every voxel in the 3D grid by calling gaussian_3d_coeff() inside a Python-level triple-nested loop.
+   -  In our optimized version, we replace that entire loop (and the per-voxel Gaussian calls) with a single fused CUDA kernel. We launch one GPU thread per voxel in a 3D block/grid, and within each thread compute the Mahalanobis-weighted Gaussian sum directly—eliminating all Python loops and separate kernel invocations for a dramatic speedup.
+     
+   - **Tesla T4**  
+     - CPU fallback: 9 164.7 ms  
+     - Fused CUDA kernel: 42.7 ms  
+     - **Speedup:** ≈ 215×  
+   - **NVIDIA L4**  
+     - CPU fallback: 8 199.5 ms  
+     - Fused CUDA kernel: 24.3 ms  
+     - **Speedup:** ≈ 338×
+   - **NVIDIA A100**  
+     - CPU fallback: 8 124.1 ms  
+     - Fused CUDA kernel: 22.7 ms  
+     - **Speedup:** ≈ 358×  
 
-  •	We rewrote it as a small CUDA kernel and launched it via PyTorch’s C++ extension API.
-
-  •	Result: CPU: 252 ms → GPU: 0.112 ms → **≈ 2.24×10¹ speedup.**
-
- 
-**2.	extract_fields()**
-
-  •	Originally, this triple-nested loop called gaussian_3d_coeff() for every voxel in the 3D grid, costing **17.367 s.**
-
-  •	We fused the loop and the Gaussian math into one 3D CUDA kernel (one thread per voxel).
-  
-  •	**On the T4 GPU**: 17.367 s → 0.1817 s → **≈ 95.6× speedup.**
-
- 
-**3.	Effect of a more powerful GPU**
-
-  •	Moving from the AWS T4 to an AWS A10G further accelerated our fused kernel to **21.36 ms.**
-
-  •	**Relative to the original Python version:** 17.367 s → 0.02136 s → **≈ 813× overall speedup.**
-
- 
-**4.	End-to-end comparison**
-
-  •	If we compare the raw Python extract_fields() time (17.367 s) to the kernel-only execution on the A10G (10.526 ms, measured with NVTX), we see a remarkable ≈ **1,650× overall speedup.**
+5. **End-to-end comparison**  
+   - Baseline (all-CPU): 39.806 s  
+   - CUDA `gaussian_3d_coeff` extension only: 37.521 s (≈ 1.06×)  
+   - Fused CUDA `extract_fields` kernel (gauss + extract): 24.394 s (≈ 1.63×)  
 
 ## 📥 Installation -  Google Colab
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](colab/MicroDreamerOptimized_Colab.ipynb)
