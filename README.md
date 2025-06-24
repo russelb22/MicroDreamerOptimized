@@ -1,5 +1,5 @@
-# MicroDreamerOptimized
-This repository was forked from the original MicroDreamer repository for use in our 3D Machine Learning with GPU Optimization course at the University of Washington, Seattle in the Spring of 2025. The aim of the project was to identify, profile, and optimize Python functions with CUDA extensions.
+# MicroDreamerOptimized - 3D reconstruction accelerated with custom CUDA kernels
+This repository was forked from the original MicroDreamer repository for use in our 3D Machine Learning with GPU Optimization course at the University of Washington, Seattle in the Spring of 2025. The aim of the project was to identify, profile, and optimize Python functions with custom CUDA kernel extensions.
 
 Original work by ML-GSAI/MicroDreamer, used here under its Apache license.
 
@@ -34,8 +34,11 @@ In this project we used NVIDIA Nsight Systems to profile MicroDreamer and identi
 **4.	End-to-end comparison**
 
   •	If we compare the raw Python extract_fields() time (17.367 s) to the kernel-only execution on the A10G (10.526 ms, measured with NVTX), we see a remarkable ≈ **1,650× overall speedup.**
-  
-## Installation
+
+## 📥 Installation -  Google Colab
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](colab/MicroDreamerOptimized_Colab.ipynb)
+
+## 📥 Installation -  Windows
 ### 1. Clone & Create Conda Environment
 From a regular command prompt opened as Administrator:
 ```bash
@@ -83,6 +86,7 @@ run_main.bat
 1. To run with profiling use the -profile flag
 2. Within run_main.bat, set USE_CUDA_GAUSS and USE_CUDA_EXTRACT to 0 or 1 depending on if you want the CUDA versions of the optimized functions to run.
 3. When run with profiling, nsys will generate a .nsys-rep file in the MicroDreamerOptimized/logdir/nsys/*.nsys-rep.n This can be loaded in Nsight Systems.
+
 
 
 ## Usage Notes from Original Repository
