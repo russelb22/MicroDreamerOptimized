@@ -39,7 +39,7 @@ These results are measured with NVTX Ranges and run in Google Colab
    - Fused CUDA `extract_fields` kernel (gauss + extract): 24.394 s (≈ 1.63×)  
 
 ## 📥 Installation -  Google Colab
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](colab/MicroDreamerOptimized_Colab.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/russelb22/MicroDreamerOptimized/blob/main/colab/MicroDreamerOptimized_Colab.ipynb)
 
 ## 📥 Installation -  Windows
 ### 1. Clone & Create Conda Environment
